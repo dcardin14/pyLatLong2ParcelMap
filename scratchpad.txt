@@ -1,0 +1,5 @@
+find_county(lat, lon)
+download_county_parcels(fips)
+load_county_parcels(fips)
+find_containing_parcel(lat, lon, parcels)
+create_map(parcel, point)
