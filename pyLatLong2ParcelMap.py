@@ -333,15 +333,55 @@ def create_map(gdf, parcel, lat, lon, county_name):
     os.startfile(output_file)
 
 
+def parse_coord(text):
+    """Convert decimal degrees or D/M/S (e.g. 27d56m43s, -99d32m22s) to decimal degrees."""
+
+    s = text.strip().upper().replace("°", "D").replace("’", "'").replace("”", '"')
+
+    try:
+        return float(s)
+    except ValueError:
+        pass
+
+    m = re.fullmatch(
+        r"([+-]?)\s*(\d+(?:\.\d+)?)\s*D"
+        r"(?:\s*(\d+(?:\.\d+)?)\s*(?:M|'))?"
+        r"(?:\s*(\d+(?:\.\d+)?)\s*(?:S|\"|''))?"
+        r"\s*([NSEW]?)",
+        s
+    )
+
+    if not m:
+        raise ValueError(f"Cannot parse coordinate: {text!r}")
+
+    sign, deg, minutes, seconds, hemi = m.groups()
+
+    value = (
+        float(deg)
+        + float(minutes or 0) / 60
+        + float(seconds or 0) / 3600
+    )
+
+    if sign == "-" or hemi in ("S", "W"):
+        value = -value
+
+    return value
+
+
 def main():
 
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         sys.exit("Usage: python pyLatLong2ParcelMap.py LAT,LON")
 
-    lat, lon = [
-        float(x)
-        for x in sys.argv[1].split(",")
-    ]
+    try:
+        lat_text, lon_text = " ".join(sys.argv[1:]).split(",")
+        lat = parse_coord(lat_text)
+        lon = parse_coord(lon_text)
+    except ValueError as e:
+        sys.exit(f"{e}\nUsage: python pyLatLong2ParcelMap.py LAT,LON")
+
+    print()
+    print(f"Decimal degrees: {lat:.6f}, {lon:.6f}")
 
     county_name, county_fips = find_county(
         lat,
