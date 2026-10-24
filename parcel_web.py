@@ -11,13 +11,14 @@ Do not expose this development server to the public internet.
 
 import contextlib
 import io
+import os
 import secrets
 import threading
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from flask import Flask, abort, render_template_string, request, send_file, url_for
+from flask import Flask, abort, render_template_string, request, send_file, url_for, Response
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -34,6 +35,28 @@ app.config["SECRET_KEY"] = secrets.token_hex(32)
 map_lock = threading.Lock()
 results = {}  # token -> {path, details, timestamp}; local demo, memory only
 RESULT_TTL = 60 * 60
+
+# Require authentication before serving any page or processing uploads.
+@app.before_request
+def require_authentication():
+    expected_password = os.environ.get("PARCEL_WEB_PASSWORD")
+
+    # Fail closed if the password has not been configured.
+    if not expected_password:
+        return Response("Server authentication is not configured.", status=503)
+
+    auth = request.authorization
+
+    if (
+        auth is None
+        or not secrets.compare_digest(auth.username or "", "daniel")
+        or not secrets.compare_digest(auth.password or "", expected_password)
+    ):
+        return Response(
+            "Authentication required.",
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="Texas Photo-to-Parcel"'},
+        )
 
 PAGE = """<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
