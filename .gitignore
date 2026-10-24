@@ -245,3 +245,17 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Original field photographs
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.heic
+*.HEIC
+
+# Generated parcel maps
+parcel_*.png
+
+# Temporary files
+scratchpad.txt
