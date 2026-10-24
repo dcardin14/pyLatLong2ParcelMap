@@ -249,12 +249,12 @@ def create_map(gdf, parcel, lat, lon, county_name):
     ax.set_xlim(pminx - pxpad, pmaxx + pxpad)
     ax.set_ylim(pminy - pypad, pmaxy + pypad)
 
-    ctx.add_basemap(
-        ax,
-        source=ctx.providers.Esri.WorldImagery,
-        crs="EPSG:3857",
-        zoom=16
-    )
+    # ctx.add_basemap(
+    #     ax,
+    #     source=ctx.providers.Esri.WorldImagery,
+    #     crs="EPSG:3857",
+    #     zoom=16
+    # )
 
     # add_basemap may alter the view; restore it
     ax.set_xlim(pminx - pxpad, pmaxx + pxpad)
