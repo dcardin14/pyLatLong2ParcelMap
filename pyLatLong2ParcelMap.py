@@ -436,7 +436,42 @@ def main():
     print("Loading:")
     print(shp_file)
 
-    gdf = gpd.read_file(shp_file)
+# -----------------------------------------
+    from shapely.geometry import box
+    from pyproj import CRS, Transformer
+    from shapely.ops import transform
+
+    search_radius = 0.01
+
+    gps_bbox = box(
+        lon - search_radius,
+        lat - search_radius,
+        lon + search_radius,
+        lat + search_radius
+    )
+
+    # Read only metadata to determine the shapefile CRS.
+    shapefile_crs = gpd.read_file(shp_file, rows=0).crs
+
+    if shapefile_crs is None:
+        raise RuntimeError("Parcel shapefile has no defined CRS.")
+
+    if CRS.from_user_input(shapefile_crs) != CRS.from_epsg(4326):
+        transformer = Transformer.from_crs(
+            "EPSG:4326",
+            shapefile_crs,
+            always_xy=True
+        )
+        search_bbox = transform(transformer.transform, gps_bbox).bounds
+    else:
+        search_bbox = gps_bbox.bounds
+
+    gdf = gpd.read_file(shp_file, bbox=search_bbox)
+
+    # Keep downstream parcel searches and mapping in longitude/latitude.
+    if gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(epsg=4326)
+# -----------------------------------------
 
     print()
     print(f"Records: {len(gdf):,}")
@@ -482,8 +517,35 @@ def main():
         f"{parcel['SITUS_ADDR']}"
     )
 
+    # Load neighboring parcels around the entire identified property.
+    minx, miny, maxx, maxy = parcel.geometry.bounds
+
+    xpad = max((maxx - minx) * 2, 0.005)
+    ypad = max((maxy - miny) * 2, 0.005)
+
+    map_bbox = (
+        minx - xpad,
+        miny - ypad,
+        maxx + xpad,
+        maxy + ypad
+    )
+
+    # Transform the map bounding box if the source CRS is not EPSG:4326.
+    if CRS.from_user_input(shapefile_crs) != CRS.from_epsg(4326):
+        map_bbox = transform(
+            transformer.transform,
+            box(*map_bbox)
+        ).bounds
+
+    map_gdf = gpd.read_file(shp_file, bbox=map_bbox)
+
+    if map_gdf.crs.to_epsg() != 4326:
+        map_gdf = map_gdf.to_crs(epsg=4326)
+
+    print(f"Map-area parcels: {len(map_gdf):,}")
+
     create_map(
-        gdf,
+        map_gdf,
         parcel,
         lat,
         lon,
