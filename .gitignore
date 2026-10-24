@@ -1,5 +1,5 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
+__pycache__/AAA
 *.py[codz]
 *$py.class
 
@@ -222,3 +222,26 @@ __marimo__/
 # Project data
 cache/
 output/
+
+# Python virtual environment
+.venv/
+venv/
+
+# Downloaded parcel data
+cache/
+
+# Generated maps
+output/
+web_results/
+
+# Uploaded photographs
+uploads/
+
+# Python temporary files
+__pycache__/
+*.pyc
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
