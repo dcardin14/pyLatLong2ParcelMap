@@ -321,7 +321,7 @@ def create_map(gdf, parcel, lat, lon, county_name):
 
     plt.savefig(
         output_file,
-        dpi=300,
+        dpi=150,
         bbox_inches="tight"
     )
 
