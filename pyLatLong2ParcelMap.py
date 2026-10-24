@@ -7,6 +7,7 @@ import requests
 import geopandas as gpd
 from shapely.geometry import Point
 import matplotlib.pyplot as plt
+import subprocess
 
 COUNTY_FILE = "counties/txdot_counties.geojson"
 
@@ -330,7 +331,8 @@ def create_map(gdf, parcel, lat, lon, county_name):
     print("Map created:")
     print(output_file)
 
-    os.startfile(output_file)
+    # os.startfile(output_file)
+    subprocess.Popen(["xdg-open", output_file])
 
 
 def parse_coord(text):
