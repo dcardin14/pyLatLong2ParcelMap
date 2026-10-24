@@ -1,0 +1,21 @@
+.git
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Photographs and generated maps
+*.jpg
+*.jpeg
+*.heic
+*.png
+
+# Downloaded parcel data
+cache/
+output/
+web_results/
+uploads/
+
+# Local secrets
+.env
+.env.*

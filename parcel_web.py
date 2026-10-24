@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Local-network photo-to-parcel Flask prototype.
+
+Run from the pyLatLong2ParcelMap project folder:
+    python parcel_web.py
+Then visit http://<debian-lan-ip>:5000 from a phone on the same Wi-Fi.
+
+Requires Flask, ExifTool, and the existing pyPhoto2Parcel.py / mapper.
+Do not expose this development server to the public internet.
+"""
+
+import contextlib
+import io
+import secrets
+import threading
+import time
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from flask import Flask, abort, render_template_string, request, send_file, url_for
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.utils import secure_filename
+
+from pyPhoto2Parcel import extract_coordinates, run_mapper
+
+BASE = Path(__file__).resolve().parent
+MAX_BYTES = 25 * 1024 * 1024
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_BYTES
+app.config["SECRET_KEY"] = secrets.token_hex(32)
+
+# The existing mapper uses fixed cache/output paths and creates a desktop image
+# viewer. Run one map request at a time to avoid concurrent writes.
+map_lock = threading.Lock()
+results = {}  # token -> {path, details, timestamp}; local demo, memory only
+RESULT_TTL = 60 * 60
+
+PAGE = """<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Texas Photo-to-Parcel</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#192a3b;background:#f2f5f8}
+main{max-width:700px;margin:2rem auto;padding:1.5rem;background:white;border-radius:16px;box-shadow:0 3px 20px #0001}
+h1{font-size:1.55rem}p{line-height:1.5}input{display:block;width:100%;margin:1rem 0;font-size:1rem}
+button,.download{display:inline-block;border:0;border-radius:9px;background:#135e9a;color:white;padding:.85rem 1.15rem;font-weight:650;text-decoration:none;font-size:1rem;cursor:pointer}
+.error{color:#a02020;background:#fff2f2;padding:1rem;border-radius:8px}.muted{color:#596a77;font-size:.92rem}
+img{width:100%;height:auto;border-radius:9px;border:1px solid #ddd}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem;border-radius:8px}
+</style></head><body><main>
+<h1>Texas Photo-to-Parcel</h1>
+<p>Upload an <strong>original GPS-tagged photograph</strong>. Your existing Python program will identify the parcel and generate an ownership map.</p>
+<form method="post" enctype="multipart/form-data">
+<label for="photo"><strong>Select original photograph</strong></label>
+<input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff" required>
+<button type="submit">Identify parcel</button>
+</form>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if result %}
+<h2>Parcel identified</h2>
+<p><strong>Photo GPS:</strong> {{ result.lat }}, {{ result.lon }}</p>
+<pre>{{ result.details }}</pre>
+<a class="download" href="{{ url_for('get_map', token=result.token) }}" download>Save parcel map (PNG)</a>
+<p><img src="{{ url_for('get_map', token=result.token) }}" alt="Generated parcel ownership map"></p>
+{% endif %}
+<p class="muted">Local-network prototype. GPS identifies the camera position, which may not be the photographed property. Appraisal/GIS ownership is preliminary, not a title opinion. Do not publish this server to the internet.</p>
+</main></body></html>"""
+
+
+def purge_old_results():
+    now = time.time()
+    for token, item in list(results.items()):
+        if now - item["timestamp"] > RESULT_TTL:
+            results.pop(token, None)
+
+
+def parcel_details_from_output(output: str, png: Path) -> str:
+    """Extract the fields already printed by the existing mapping script."""
+    fields = ("OWNER_NAME", "PROP_ID", "GEO_ID", "LEGAL_AREA", "LEGAL_DESC", "SITUS_ADDR")
+    found = {}
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key.strip() in fields:
+            found[key.strip()] = value.strip()
+    if found:
+        return "\n".join(f"{field}: {found[field]}" for field in fields if field in found)
+    return f"Map: {png.name}"
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def too_large(_):
+    return render_template_string(PAGE, error="File exceeds 25 MB. Please choose a smaller original photo.", result=None), 413
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    purge_old_results()
+    if request.method == "GET":
+        return render_template_string(PAGE, error=None, result=None)
+
+    uploaded = request.files.get("photo")
+    if not uploaded or not uploaded.filename:
+        return render_template_string(PAGE, error="Please choose a photograph.", result=None), 400
+    suffix = Path(secure_filename(uploaded.filename)).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff"}:
+        return render_template_string(PAGE, error="Please upload a JPEG, HEIC, HEIF, or TIFF original photograph.", result=None), 400
+
+    # ExifTool checks actual metadata; file extension alone is not a trust boundary.
+    try:
+        with TemporaryDirectory(prefix="parcel_photo_") as tmp:
+            photo_path = Path(tmp) / ("upload" + suffix)
+            uploaded.save(photo_path)
+            lat, lon = extract_coordinates(photo_path)
+            if not map_lock.acquire(blocking=False):
+                return render_template_string(PAGE, error="Another map is being generated. Please try again shortly.", result=None), 429
+            try:
+                log = io.StringIO()
+                with contextlib.redirect_stdout(log):
+                    map_path = run_mapper(lat, lon)
+                output = log.getvalue()
+                app.logger.info("Map generation completed: %s", map_path.name)
+                # The existing mapper overwrites maps for the same parcel. Make a
+                # separate snapshot per request so links remain stable.
+                token = secrets.token_urlsafe(24)
+                snapshot_dir = BASE / "web_results"
+                snapshot_dir.mkdir(exist_ok=True)
+                snapshot = snapshot_dir / f"{token}.png"
+                import shutil
+                shutil.copy2(map_path, snapshot)
+                results[token] = {"path": snapshot, "timestamp": time.time()}
+            finally:
+                map_lock.release()
+        result = {"lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "details": parcel_details_from_output(output, map_path), "token": token}
+        return render_template_string(PAGE, error=None, result=result)
+    except (RuntimeError, OSError, ValueError) as exc:
+        app.logger.exception("Photo processing failed")
+        return render_template_string(PAGE, error=str(exc), result=None), 400
+
+
+@app.route("/map/<token>")
+def get_map(token):
+    purge_old_results()
+    item = results.get(token)
+    if item is None or not item["path"].is_file():
+        abort(404)
+    return send_file(item["path"], mimetype="image/png", as_attachment=False, download_name="parcel_map.png")
+
+
+if __name__ == "__main__":
+    print("Photo-to-parcel web app running on port 5000")
+    print("Open http://<your-debian-computer-LAN-IP>:5000 on your phone")
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

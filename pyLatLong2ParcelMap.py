@@ -331,8 +331,9 @@ def create_map(gdf, parcel, lat, lon, county_name):
     print("Map created:")
     print(output_file)
 
-    # os.startfile(output_file)
-    subprocess.Popen(["xdg-open", output_file])
+    # os.startfile(output_file)  Only  make the map if it's on my local machine.
+    if not os.environ.get("RAILWAY_ENVIRONMENT"):
+        subprocess.Popen(["xdg-open", output_file])
 
 
 def parse_coord(text):
