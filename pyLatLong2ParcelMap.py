@@ -8,6 +8,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 import matplotlib.pyplot as plt
 import subprocess
+#import pyogrio
 
 COUNTY_FILE = "counties/txdot_counties.geojson"
 
@@ -19,6 +20,15 @@ DOWNLOAD_BASE = (
     "LCD/collection/stratmap-2026-land-parcels/"
     "items/shp/"
 )
+
+
+
+import psutil
+
+def memory_checkpoint(label):
+    process = psutil.Process()
+    rss = process.memory_info().rss / (1024 * 1024)
+    print(f"[MEMORY] {label}: {rss:.1f} MB", flush=True)
 
 
 def find_county(lat, lon):
@@ -187,10 +197,12 @@ def create_map(gdf, parcel, lat, lon, county_name):
     )
 
     # Web Mercator is required for the aerial basemap
+    memory_checkpoint("Before coordinate conversion")
     nearby = nearby.to_crs(epsg=3857)
     parcel_gdf = parcel_gdf.to_crs(epsg=3857)
     point_gdf = point_gdf.to_crs(epsg=3857)
 
+    memory_checkpoint("Before Matplotlib figure")
     fig, ax = plt.subplots(
         figsize=(10, 10)
     )
@@ -320,12 +332,14 @@ def create_map(gdf, parcel, lat, lon, county_name):
         f"{safe_name}.png"
     )
 
+    memory_checkpoint("Before saving PNG")
     plt.savefig(
         output_file,
         dpi=150,
         bbox_inches="tight"
     )
 
+    memory_checkpoint("After saving PNG")
     plt.close()
 
     print()
@@ -387,10 +401,12 @@ def main():
     print()
     print(f"Decimal degrees: {lat:.6f}, {lon:.6f}")
 
+    memory_checkpoint("Before county lookup")
     county_name, county_fips = find_county(
         lat,
         lon
     )
+    memory_checkpoint("After county lookup")
 
     print()
     print("County:", county_name)
@@ -452,7 +468,8 @@ def main():
     )
 
     # Read only metadata to determine the shapefile CRS.
-    shapefile_crs = gpd.read_file(shp_file, rows=0).crs
+    shapefile_crs = __import__("pyogrio").read_info(shp_file)["crs"]  #This was causing a memory bottleneck
+    #shapefile_crs = pyogrio.read_info(shp_file)["crs"]
 
     if shapefile_crs is None:
         raise RuntimeError("Parcel shapefile has no defined CRS.")
@@ -467,7 +484,9 @@ def main():
     else:
         search_bbox = gps_bbox.bounds
 
+    memory_checkpoint("Before initial parcel read")
     gdf = gpd.read_file(shp_file, bbox=search_bbox)
+    memory_checkpoint("After initial parcel read")
 
     # Keep downstream parcel searches and mapping in longitude/latitude.
     if gdf.crs.to_epsg() != 4326:
@@ -538,7 +557,9 @@ def main():
             box(*map_bbox)
         ).bounds
 
+    memory_checkpoint("Before neighboring parcel read")
     map_gdf = gpd.read_file(shp_file, bbox=map_bbox)
+    memory_checkpoint("After neighboring parcel read")
 
     if map_gdf.crs.to_epsg() != 4326:
         map_gdf = map_gdf.to_crs(epsg=4326)
