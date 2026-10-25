@@ -24,4 +24,5 @@ ENV MPLBACKEND=Agg
 ENV PYTHONUNBUFFERED=1
 
 # Start the Flask application using Gunicorn
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 2 --timeout 300 parcel_web:app"]
+# CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 2 --timeout 300 parcel_web:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 2 --timeout 300 --access-logfile - --error-logfile - --capture-output parcel_web:app"]
