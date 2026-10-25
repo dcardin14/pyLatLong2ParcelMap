@@ -4,6 +4,7 @@ import sys
 import zipfile
 import requests
 import geopandas as gpd
+import pandas as pd
 from shapely.geometry import Point
 import matplotlib.pyplot as plt
 import subprocess
@@ -444,13 +445,7 @@ def main():
             "No shapefiles found."
         )
 
-    shp_file = shp_files[0]
-
-    print()
-    print("Loading:")
-    print(shp_file)
-
-# -----------------------------------------
+   # ----------------------------------------
     from shapely.geometry import box
     from pyproj import CRS, Transformer
     from shapely.ops import transform
@@ -464,27 +459,52 @@ def main():
         lat + search_radius
     )
 
-    # Read only metadata to determine the shapefile CRS.
-    shapefile_crs = pyogrio.read_info(shp_file)["crs"]
+    nearby_frames = []
 
-    if shapefile_crs is None:
-        raise RuntimeError("Parcel shapefile has no defined CRS.")
+    for shp in sorted(shp_files):
+        print()
+        print("Searching shapefile:", shp, flush=True)
 
-    if CRS.from_user_input(shapefile_crs) != CRS.from_epsg(4326):
-        transformer = Transformer.from_crs(
-            "EPSG:4326",
-            shapefile_crs,
-            always_xy=True
+        source_crs = pyogrio.read_info(shp)["crs"]
+
+        if source_crs is None:
+            raise RuntimeError(
+                f"Parcel shapefile has no defined CRS: {shp}"
+            )
+
+        if CRS.from_user_input(source_crs) != CRS.from_epsg(4326):
+            source_transformer = Transformer.from_crs(
+                "EPSG:4326",
+                source_crs,
+                always_xy=True
+            )
+            search_bbox = transform(
+                source_transformer.transform,
+                gps_bbox
+            ).bounds
+        else:
+            search_bbox = gps_bbox.bounds
+
+        nearby = gpd.read_file(shp, bbox=search_bbox)
+
+        if not nearby.empty:
+            nearby = nearby.to_crs(epsg=4326)
+            nearby_frames.append(nearby)
+
+        print(f"Nearby records: {len(nearby):,}", flush=True)
+
+    if not nearby_frames:
+        raise RuntimeError(
+            "No parcel records found near the GPS coordinates."
         )
-        search_bbox = transform(transformer.transform, gps_bbox).bounds
-    else:
-        search_bbox = gps_bbox.bounds
 
-    gdf = gpd.read_file(shp_file, bbox=search_bbox)
+    gdf = gpd.GeoDataFrame(
+        pd.concat(nearby_frames, ignore_index=True),
+        geometry="geometry",
+        crs="EPSG:4326"
+    )
 
-    # Keep downstream parcel searches and mapping in longitude/latitude.
-    if gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(epsg=4326)
+    shapefile_crs = "EPSG:4326"
 # -----------------------------------------
 
     print()
@@ -567,19 +587,43 @@ def main():
         maxx + xpad,
         maxy + ypad
     )
+#-------------------------------------------------------------------------------
+    # Load neighboring parcels from every county shapefile.
+    map_frames = []
 
-    # Transform the map bounding box if the source CRS is not EPSG:4326.
-    if CRS.from_user_input(shapefile_crs) != CRS.from_epsg(4326):
-        map_bbox = transform(
-            transformer.transform,
-            box(*map_bbox)
-        ).bounds
+    for shp in sorted(shp_files):
+        source_crs = pyogrio.read_info(shp)["crs"]
 
-    map_gdf = gpd.read_file(shp_file, bbox=map_bbox)
+        if CRS.from_user_input(source_crs) != CRS.from_epsg(4326):
+            source_transformer = Transformer.from_crs(
+                "EPSG:4326",
+                source_crs,
+                always_xy=True
+            )
+            source_bbox = transform(
+                source_transformer.transform,
+                box(*map_bbox)
+            ).bounds
+        else:
+            source_bbox = map_bbox
 
-    if map_gdf.crs.to_epsg() != 4326:
-        map_gdf = map_gdf.to_crs(epsg=4326)
+        nearby_map = gpd.read_file(shp, bbox=source_bbox)
 
+        if not nearby_map.empty:
+            nearby_map = nearby_map.to_crs(epsg=4326)
+            map_frames.append(nearby_map)
+
+    if not map_frames:
+        raise RuntimeError(
+            "No neighboring parcel records found for map."
+        )
+
+    map_gdf = gpd.GeoDataFrame(
+        pd.concat(map_frames, ignore_index=True),
+        geometry="geometry",
+        crs="EPSG:4326"
+    )
+#-------------------------------------------------------------------------------
     print(f"Map-area parcels: {len(map_gdf):,}")
 
     create_map(
