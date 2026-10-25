@@ -47,11 +47,22 @@ def require_authentication():
 
     auth = request.authorization
 
-    if (
-        auth is None
-        or not secrets.compare_digest(auth.username or "", "daniel")
-        or not secrets.compare_digest(auth.password or "", expected_password)
-    ):
+    tester_password = os.environ.get("PARCEL_TEST_PASSWORD")
+
+    admin_ok = (
+        auth is not None
+        and secrets.compare_digest(auth.username or "", "daniel")
+        and secrets.compare_digest(auth.password or "", expected_password)
+    )
+
+    tester_ok = (
+        auth is not None
+        and bool(tester_password)
+        and secrets.compare_digest(auth.username or "", "tester")
+        and secrets.compare_digest(auth.password or "", tester_password)
+    )
+
+    if not (admin_ok or tester_ok):
         return Response(
             "Authentication required.",
             status=401,
