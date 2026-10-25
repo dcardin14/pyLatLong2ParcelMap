@@ -68,19 +68,45 @@ h1{font-size:1.55rem}p{line-height:1.5}input{display:block;width:100%;margin:1re
 button,.download{display:inline-block;border:0;border-radius:9px;background:#135e9a;color:white;padding:.85rem 1.15rem;font-weight:650;text-decoration:none;font-size:1rem;cursor:pointer}
 .error{color:#a02020;background:#fff2f2;padding:1rem;border-radius:8px}.muted{color:#596a77;font-size:.92rem}
 img{width:100%;height:auto;border-radius:9px;border:1px solid #ddd}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem;border-radius:8px}
+.spinner{display:inline-block;width:18px;height:18px;border:3px solid #cbd5e1;border-top-color:#135e9a;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+#processing_status{margin-top:1rem;padding:1rem;background:#eef6fc;border-radius:9px}
+#processing_status[hidden]{display:none}
+button:disabled{opacity:.6;cursor:wait}
 </style></head><body><main>
 <h1>Texas Photo-to-Parcel</h1>
 <p>Upload an <strong>original GPS-tagged photograph</strong>. Your existing Python program will identify the parcel and generate an ownership map.</p>
-<form method="post" enctype="multipart/form-data">
+<form id="parcel_form" method="post" enctype="multipart/form-data">
 <label for="photo"><strong>Select original photograph</strong></label>
 <input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff">
 <input type="hidden" id="phone_lat" name="phone_lat">
 <input type="hidden" id="phone_lon" name="phone_lon">
 <button type="button" id="location_button" onclick="usePhoneLocation()">Use My Current Location</button>
 <p id="location_status" class="muted" role="status"></p>
-<button type="submit">Identify parcel</button>
+<button type="submit" id="submit_button">Identify parcel</button>
+<div id="processing_status" role="status" aria-live="polite" hidden>
+  <p><span class="spinner"></span> <strong>Identifying parcel...</strong></p>
+  <p id="processing_timer" class="muted">Elapsed time: 0 seconds</p>
+  <p class="muted">Locating parcel records and generating your map. This may take a minute.</p>
+</div>
 </form>
 <script>
+document.getElementById("parcel_form").addEventListener("submit", function() {
+    const button = document.getElementById("submit_button");
+    const status = document.getElementById("processing_status");
+    const timer = document.getElementById("processing_timer");
+
+    status.hidden = false;
+    button.disabled = true;
+    button.textContent = "Processing...";
+
+    const started = Date.now();
+    setInterval(function() {
+        const seconds = Math.floor((Date.now() - started) / 1000);
+        timer.textContent = "Elapsed time: " + seconds + " seconds";
+    }, 1000);
+});
+
 function usePhoneLocation() {
     const status = document.getElementById("location_status");
     const button = document.getElementById("location_button");
