@@ -56,24 +56,47 @@ def find_parcel(gdf, lat, lon):
 
     print(f"Candidate parcels: {len(hits)}")
 
-    if not hits:
-        raise RuntimeError(
-            "No candidate parcels found."
+    if hits:
+        candidates = gdf.iloc[hits]
+
+        for _, row in candidates.iterrows():
+            if (
+                row.geometry.contains(point)
+                or row.geometry.touches(point)
+            ):
+                print("Exact parcel match found.")
+                return row
+
+    # No exact match: find nearest parcel.
+    print("No exact parcel match. Checking nearby parcels...")
+
+    point_m = gpd.GeoSeries(
+        [point],
+        crs="EPSG:4326"
+    ).to_crs("EPSG:32615").iloc[0]
+
+    parcels_m = gdf.to_crs("EPSG:32615")
+
+    distances = parcels_m.geometry.distance(point_m)
+    nearest_idx = distances.idxmin()
+    nearest_distance = distances.loc[nearest_idx]
+
+    print(f"Nearest parcel distance: {nearest_distance:.2f} meters")
+
+    max_distance = 15.0
+
+    if nearest_distance <= max_distance:
+        print(
+            "WARNING: Using nearest parcel, "
+            "not an exact GPS intersection."
         )
-
-    candidates = gdf.iloc[hits]
-
-    for _, row in candidates.iterrows():
-
-        if (
-            row.geometry.contains(point)
-            or row.geometry.touches(point)
-        ):
-            return row
+        return gdf.loc[nearest_idx]
 
     raise RuntimeError(
-        "No parcel contains the point."
+        f"No parcel found within {max_distance} meters. "
+        f"Nearest parcel is {nearest_distance:.2f} meters away."
     )
+
 
 def download_parcel_zip(fips):
 
@@ -466,6 +489,30 @@ def main():
 
     print()
     print(f"Records: {len(gdf):,}")
+
+    print("Shapefile CRS:", shapefile_crs)
+    print("Loaded CRS:", gdf.crs)
+    print("GPS point:", lon, lat)
+    print("Loaded bounds:", gdf.total_bounds)
+    print("Valid geometries:", gdf.geometry.is_valid.sum())
+    print("Empty geometries:", gdf.geometry.is_empty.sum())
+    point = Point(lon, lat)
+    print("Direct intersection count:", gdf.geometry.intersects(point).sum())
+    print("Spatial index bbox hits:", len(gdf.sindex.query(point)))
+
+    point = gpd.GeoSeries(
+        [Point(lon, lat)],
+        crs="EPSG:4326"
+    ).to_crs("EPSG:32615")
+
+    parcels_m = gdf.to_crs("EPSG:32615")
+
+    distances = parcels_m.geometry.distance(point.iloc[0])
+
+    nearest_idx = distances.idxmin()
+
+    print("Nearest parcel distance (meters):", distances.loc[nearest_idx])
+    print("Nearest parcel owner:", gdf.loc[nearest_idx, "OWNER_NAME"])
 
     parcel = find_parcel(
         gdf,
