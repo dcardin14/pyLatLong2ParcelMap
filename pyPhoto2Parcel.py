@@ -87,7 +87,10 @@ def run_mapper(lat: float, lon: float) -> Path:
 
     exit_code = process.wait()
     if exit_code != 0:
-        raise RuntimeError(f"Parcel mapping failed (exit code {exit_code}).")
+        raise RuntimeError(
+            f"Parcel mapping failed (exit code {exit_code}).\\n"
+            + "\\n".join(output_lines[-40:])
+        )
 
     # Existing create_map() prints 'Map created:' then the relative filename.
     output_path_text = None
