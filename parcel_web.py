@@ -74,12 +74,46 @@ img{width:100%;height:auto;border-radius:9px;border:1px solid #ddd}pre{white-spa
 <form method="post" enctype="multipart/form-data">
 <label for="photo"><strong>Select original photograph</strong></label>
 <input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff" required>
+<input type="hidden" id="phone_lat" name="phone_lat">
+<input type="hidden" id="phone_lon" name="phone_lon">
+<button type="button" id="location_button" onclick="usePhoneLocation()">Use My Current Location</button>
+<p id="location_status" class="muted" role="status"></p>
 <button type="submit">Identify parcel</button>
 </form>
+<script>
+function usePhoneLocation() {
+    const status = document.getElementById("location_status");
+    const button = document.getElementById("location_button");
+
+    if (!navigator.geolocation) {
+        status.textContent = "Your browser does not support location services.";
+        return;
+    }
+
+    button.disabled = true;
+    status.textContent = "Requesting your phone's location...";
+
+    navigator.geolocation.getCurrentPosition(
+        function(position) {
+            document.getElementById("phone_lat").value = position.coords.latitude;
+            document.getElementById("phone_lon").value = position.coords.longitude;
+            status.textContent = "Phone GPS acquired. You can now identify the parcel.";
+            button.disabled = false;
+        },
+        function(error) {
+            document.getElementById("phone_lat").value = "";
+            document.getElementById("phone_lon").value = "";
+            status.textContent = "Unable to get location: " + error.message;
+            button.disabled = false;
+        },
+        {enableHighAccuracy: true, timeout: 15000, maximumAge: 0}
+    );
+}
+</script>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if result %}
 <h2>Parcel identified</h2>
-<p><strong>Photo GPS:</strong> {{ result.lat }}, {{ result.lon }}</p>
+<p><strong>{{ result.gps_source }}:</strong> {{ result.lat }}, {{ result.lon }}</p>
 <pre>{{ result.details }}</pre>
 <a class="download" href="{{ url_for('get_map', token=result.token) }}" download>Save parcel map (PNG)</a>
 <p><img src="{{ url_for('get_map', token=result.token) }}" alt="Generated parcel ownership map"></p>
@@ -133,7 +167,29 @@ def index():
         with TemporaryDirectory(prefix="parcel_photo_") as tmp:
             photo_path = Path(tmp) / ("upload" + suffix)
             uploaded.save(photo_path)
-            lat, lon = extract_coordinates(photo_path)
+            # Prefer the photograph's original GPS coordinates.
+            # Use phone GPS only if the photograph has no GPS metadata.
+            phone_lat = request.form.get("phone_lat", "").strip()
+            phone_lon = request.form.get("phone_lon", "").strip()
+
+            try:
+                lat, lon = extract_coordinates(photo_path)
+                gps_source = "Photo GPS"
+            except ValueError:
+                if not phone_lat or not phone_lon:
+                    raise ValueError(
+                        "This photograph has no GPS coordinates. "
+                        "Tap 'Use My Current Location' and try again."
+                    )
+
+                lat = float(phone_lat)
+                lon = float(phone_lon)
+
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError("Invalid phone GPS coordinates.")
+
+                gps_source = "Phone GPS"
+
             if not map_lock.acquire(blocking=False):
                 return render_template_string(PAGE, error="Another map is being generated. Please try again shortly.", result=None), 429
             try:
@@ -153,7 +209,7 @@ def index():
                 results[token] = {"path": snapshot, "timestamp": time.time()}
             finally:
                 map_lock.release()
-        result = {"lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "details": parcel_details_from_output(output, map_path), "token": token}
+        result = {"lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "gps_source": gps_source, "details": parcel_details_from_output(output, map_path), "token": token}
         return render_template_string(PAGE, error=None, result=result)
     except (RuntimeError, OSError, ValueError) as exc:
         app.logger.exception("Photo processing failed")

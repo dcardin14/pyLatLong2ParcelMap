@@ -44,7 +44,7 @@ def extract_coordinates(photo: Path) -> tuple[float, float]:
         lat = float(metadata["GPSLatitude"])
         lon = float(metadata["GPSLongitude"])
     except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
+        raise ValueError(
             "No usable GPS latitude/longitude found in this photo. "
             "Transfer the original image from your phone rather than a resized "
             "or messaging-app copy."
