@@ -73,7 +73,7 @@ img{width:100%;height:auto;border-radius:9px;border:1px solid #ddd}pre{white-spa
 <p>Upload an <strong>original GPS-tagged photograph</strong>. Your existing Python program will identify the parcel and generate an ownership map.</p>
 <form method="post" enctype="multipart/form-data">
 <label for="photo"><strong>Select original photograph</strong></label>
-<input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff" required>
+<input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff">
 <input type="hidden" id="phone_lat" name="phone_lat">
 <input type="hidden" id="phone_lon" name="phone_lon">
 <button type="button" id="location_button" onclick="usePhoneLocation()">Use My Current Location</button>
@@ -156,39 +156,61 @@ def index():
         return render_template_string(PAGE, error=None, result=None)
 
     uploaded = request.files.get("photo")
-    if not uploaded or not uploaded.filename:
-        return render_template_string(PAGE, error="Please choose a photograph.", result=None), 400
-    suffix = Path(secure_filename(uploaded.filename)).suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff"}:
-        return render_template_string(PAGE, error="Please upload a JPEG, HEIC, HEIF, or TIFF original photograph.", result=None), 400
+    has_photo = bool(uploaded and uploaded.filename)
 
-    # ExifTool checks actual metadata; file extension alone is not a trust boundary.
+    phone_lat = request.form.get("phone_lat", "").strip()
+    phone_lon = request.form.get("phone_lon", "").strip()
+
+    if not has_photo and not (phone_lat and phone_lon):
+        return render_template_string(
+            PAGE,
+            error="Select a photograph or tap 'Use My Current Location'.",
+            result=None,
+        ), 400
+
+    suffix = ""
+    if has_photo:
+        suffix = Path(secure_filename(uploaded.filename)).suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff"}:
+            return render_template_string(
+                PAGE,
+                error="Please upload a JPEG, HEIC, HEIF, or TIFF photograph.",
+                result=None,
+            ), 400
+
     try:
         with TemporaryDirectory(prefix="parcel_photo_") as tmp:
-            photo_path = Path(tmp) / ("upload" + suffix)
-            uploaded.save(photo_path)
-            # Prefer the photograph's original GPS coordinates.
-            # Use phone GPS only if the photograph has no GPS metadata.
-            phone_lat = request.form.get("phone_lat", "").strip()
-            phone_lon = request.form.get("phone_lon", "").strip()
+            gps_source = "Phone GPS"
 
-            try:
-                lat, lon = extract_coordinates(photo_path)
-                gps_source = "Photo GPS"
-            except ValueError:
-                if not phone_lat or not phone_lon:
-                    raise ValueError(
-                        "This photograph has no GPS coordinates. "
-                        "Tap 'Use My Current Location' and try again."
-                    )
+            if has_photo:
+                photo_path = Path(tmp) / ("upload" + suffix)
+                uploaded.save(photo_path)
 
-                lat = float(phone_lat)
-                lon = float(phone_lon)
+                try:
+                    lat, lon = extract_coordinates(photo_path)
+                    gps_source = "Photo GPS"
+                except ValueError:
+                    if not (phone_lat and phone_lon):
+                        raise ValueError(
+                            "This photograph has no GPS coordinates. "
+                            "Tap 'Use My Current Location' and try again."
+                        )
 
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            if gps_source == "Phone GPS":
+                try:
+                    lat = float(phone_lat)
+                    lon = float(phone_lon)
+                except ValueError:
                     raise ValueError("Invalid phone GPS coordinates.")
 
-                gps_source = "Phone GPS"
+                import math
+                if not (
+                    math.isfinite(lat)
+                    and math.isfinite(lon)
+                    and -90 <= lat <= 90
+                    and -180 <= lon <= 180
+                ):
+                    raise ValueError("Invalid phone GPS coordinates.")
 
             if not map_lock.acquire(blocking=False):
                 return render_template_string(PAGE, error="Another map is being generated. Please try again shortly.", result=None), 429
