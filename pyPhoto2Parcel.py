@@ -59,18 +59,35 @@ def extract_coordinates(photo: Path) -> tuple[float, float]:
     return lat, lon
 
 
-def run_mapper(lat: float, lon: float) -> Path:
+def run_mapper(
+    lat: float,
+    lon: float,
+    include_geojson: bool = False,
+    exact_only: bool = False,
+    prop_id: str | None = None,
+):
     """Run the existing mapping program and locate its reported output PNG."""
     if not MAPPER.is_file():
         raise RuntimeError(f"Cannot find existing mapping script: {MAPPER}")
 
     coordinate_argument = f"{lat:.12f},{lon:.12f}"
-    print(f"\nRunning: {MAPPER.name} {coordinate_argument}\n", flush=True)
+
+    command = [sys.executable, str(MAPPER), coordinate_argument]
+
+    if exact_only:
+        command.append("--exact-only")
+
+    if prop_id is not None:
+        if not exact_only:
+            raise ValueError("prop_id requires exact_only=True")
+        command.extend(["--prop-id", str(prop_id)])
+
+    print(f"\nRunning: {' '.join(command)}\n", flush=True)
 
     # Run in the project directory so its existing relative paths (counties/,
     # cache/, output/) continue working without changing the original script.
     process = subprocess.Popen(
-        [sys.executable, str(MAPPER), coordinate_argument],
+        command,
         cwd=PROJECT_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -106,8 +123,17 @@ def run_mapper(lat: float, lon: float) -> Path:
         output_path = PROJECT_DIR / output_path
     if not output_path.is_file():
         raise RuntimeError(f"Mapping reported a PNG that does not exist: {output_path}")
-    return output_path.resolve()
+    if include_geojson:
+        geojson_path = PROJECT_DIR / "output" / "nearby_parcels.geojson"
 
+        if not geojson_path.is_file():
+            raise RuntimeError(
+                f"Mapping completed, but GeoJSON was not created: {geojson_path}"
+            )
+
+        return output_path.resolve(), geojson_path.resolve()
+
+    return output_path.resolve()
 
 def main() -> int:
     parser = argparse.ArgumentParser(

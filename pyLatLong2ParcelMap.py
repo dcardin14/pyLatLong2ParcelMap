@@ -41,7 +41,7 @@ def find_county(lat, lon):
 
     return row["CNTY_NM"], str(row["CNTY_FIPS"])
 
-def find_parcel(gdf, lat, lon):
+def find_parcel(gdf, lat, lon, exact_only=False):
 
     point = Point(lon, lat)
 
@@ -67,6 +67,13 @@ def find_parcel(gdf, lat, lon):
             ):
                 print("Exact parcel match found.")
                 return row
+
+    # Final parcel selections must intersect the selected coordinates.
+    if exact_only:
+        raise RuntimeError(
+            "Confirmed location does not intersect a parcel. "
+            "Move the blue dot inside the desired parcel."
+        )
 
     # No exact match: find nearest parcel.
     print("No exact parcel match. Checking nearby parcels...")
@@ -391,8 +398,30 @@ def main():
     if len(sys.argv) < 2:
         sys.exit("Usage: python pyLatLong2ParcelMap.py LAT,LON")
 
+    exact_only = "--exact-only" in sys.argv
+
+    args = sys.argv[1:].copy()
+    expected_prop_id = None
+
+    if "--prop-id" in args:
+        index = args.index("--prop-id")
+
+        if index + 1 >= len(args):
+            sys.exit("--prop-id requires a property ID.")
+
+        expected_prop_id = args[index + 1]
+        del args[index:index + 2]
+
+    args = [
+        arg for arg in args
+        if arg != "--exact-only"
+    ]
+
+    if expected_prop_id is not None and not exact_only:
+        sys.exit("--prop-id requires --exact-only.")
+
     try:
-        lat_text, lon_text = " ".join(sys.argv[1:]).split(",")
+        lat_text, lon_text = " ".join(args).split(",")
         lat = parse_coord(lat_text)
         lon = parse_coord(lon_text)
     except ValueError as e:
@@ -537,9 +566,19 @@ def main():
     parcel = find_parcel(
         gdf,
         lat,
-        lon
+        lon,
+        exact_only=exact_only
     )
+    if expected_prop_id is not None:
+        actual_prop_id = str(parcel["PROP_ID"])
 
+        if actual_prop_id != expected_prop_id:
+            raise RuntimeError(
+                "Confirmed parcel ID does not match the "
+                "parcel at the selected coordinates. "
+                f"Expected {expected_prop_id}, "
+                f"found {actual_prop_id}."
+            )
     print()
     print("=" * 60)
     print("PARCEL FOUND")
@@ -625,7 +664,37 @@ def main():
     )
 #-------------------------------------------------------------------------------
     print(f"Map-area parcels: {len(map_gdf):,}")
+    # Export nearby parcels for future interactive map selection.
+    # Keep only the fields needed by the web interface.
+    geojson_fields = [
+        "PROP_ID",
+        "GEO_ID",
+        "OWNER_NAME",
+        "SITUS_ADDR",
+        "geometry",
+    ]
 
+    interactive_parcels = map_gdf[geojson_fields].copy()
+
+    # Exclude missing or empty geometries.
+    interactive_parcels = interactive_parcels[
+        interactive_parcels.geometry.notna()
+        & ~interactive_parcels.geometry.is_empty
+    ]
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    geojson_path = os.path.join(
+        OUTPUT_DIR,
+        "nearby_parcels.geojson"
+    )
+
+    interactive_parcels.to_file(
+        geojson_path,
+        driver="GeoJSON"
+    )
+
+    print(f"GeoJSON created: {geojson_path}")
     create_map(
         map_gdf,
         parcel,
