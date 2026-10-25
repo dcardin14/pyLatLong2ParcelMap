@@ -138,6 +138,21 @@ function usePhoneLocation() {
 </script>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if result %}
+{% if result.match_type == "exact" %}
+<p style="background:#e8f5e9;padding:1rem;border-radius:9px">
+<strong>Exact parcel intersection</strong><br>
+Your GPS point falls inside or on the boundary of this parcel.
+</p>
+{% elif result.match_type == "nearby" %}
+<p style="background:#fff3cd;padding:1rem;border-radius:9px">
+<strong>Nearby parcel — verify this result</strong><br>
+Your GPS point falls outside this parcel.
+The nearest parcel is {{ result.match_distance }} meters away.
+This may not be the correct property.
+</p>
+{% else %}
+<p class="muted">Parcel match method could not be determined.</p>
+{% endif %}
 <h2>Parcel identified</h2>
 <p><strong>{{ result.gps_source }}:</strong> {{ result.lat }}, {{ result.lon }}</p>
 <pre>{{ result.details }}</pre>
@@ -257,7 +272,22 @@ def index():
                 results[token] = {"path": snapshot, "timestamp": time.time()}
             finally:
                 map_lock.release()
-        result = {"lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "gps_source": gps_source, "details": parcel_details_from_output(output, map_path), "token": token}
+        import re
+        match_type = "unknown"
+        match_distance = None
+
+        if "Exact parcel match found." in output:
+            match_type = "exact"
+        else:
+            match = re.search(
+                r"Nearest parcel distance: ([0-9.]+) meters",
+                output
+            )
+            if match:
+                match_type = "nearby"
+                match_distance = match.group(1)
+
+        result = {"match_type": match_type, "match_distance": match_distance, "lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "gps_source": gps_source, "details": parcel_details_from_output(output, map_path), "token": token}
         return render_template_string(PAGE, error=None, result=result)
     except (RuntimeError, OSError, ValueError) as exc:
         app.logger.exception("Photo processing failed")
