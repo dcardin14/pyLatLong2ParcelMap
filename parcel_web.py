@@ -81,6 +81,7 @@ button:disabled{opacity:.6;cursor:wait}
 <input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff">
 <input type="hidden" id="phone_lat" name="phone_lat">
 <input type="hidden" id="phone_lon" name="phone_lon">
+<input type="hidden" id="phone_accuracy" name="phone_accuracy">
 <button type="button" id="location_button" onclick="usePhoneLocation()">Use My Current Location</button>
 <p id="location_status" class="muted" role="status"></p>
 <button type="submit" id="submit_button">Identify parcel</button>
@@ -123,12 +124,14 @@ function usePhoneLocation() {
         function(position) {
             document.getElementById("phone_lat").value = position.coords.latitude;
             document.getElementById("phone_lon").value = position.coords.longitude;
+            document.getElementById("phone_accuracy").value = position.coords.accuracy;
             status.textContent = "Phone GPS acquired. You can now identify the parcel.";
             button.disabled = false;
         },
         function(error) {
             document.getElementById("phone_lat").value = "";
             document.getElementById("phone_lon").value = "";
+            document.getElementById("phone_accuracy").value = "";
             status.textContent = "Unable to get location: " + error.message;
             button.disabled = false;
         },
@@ -155,6 +158,9 @@ This may not be the correct property.
 {% endif %}
 <h2>Parcel identified</h2>
 <p><strong>{{ result.gps_source }}:</strong> {{ result.lat }}, {{ result.lon }}</p>
+{% if result.accuracy is not none %}
+<p><strong>Reported GPS accuracy:</strong> ±{{ result.accuracy }} feet</p>
+{% endif %}
 <pre>{{ result.details }}</pre>
 <a class="download" href="{{ url_for('get_map', token=result.token) }}" download>Save parcel map (PNG)</a>
 <p><img src="{{ url_for('get_map', token=result.token) }}" alt="Generated parcel ownership map"></p>
@@ -201,6 +207,7 @@ def index():
 
     phone_lat = request.form.get("phone_lat", "").strip()
     phone_lon = request.form.get("phone_lon", "").strip()
+    phone_accuracy = request.form.get("phone_accuracy", "").strip()
 
     if not has_photo and not (phone_lat and phone_lon):
         return render_template_string(
@@ -287,7 +294,17 @@ def index():
                 match_type = "nearby"
                 match_distance = match.group(1)
 
-        result = {"match_type": match_type, "match_distance": match_distance, "lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "gps_source": gps_source, "details": parcel_details_from_output(output, map_path), "token": token}
+        accuracy_display = None
+        if gps_source == "Phone GPS" and phone_accuracy:
+            try:
+                import math
+                accuracy_value = float(phone_accuracy)
+                if math.isfinite(accuracy_value) and accuracy_value >= 0:
+                    accuracy_display = f"{accuracy_value * 3.28084:.1f}"
+            except ValueError:
+                pass
+
+        result = {"accuracy": accuracy_display, "match_type": match_type, "match_distance": match_distance, "lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "gps_source": gps_source, "details": parcel_details_from_output(output, map_path), "token": token}
         return render_template_string(PAGE, error=None, result=result)
     except (RuntimeError, OSError, ValueError) as exc:
         app.logger.exception("Photo processing failed")
