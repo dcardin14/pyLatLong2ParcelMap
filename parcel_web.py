@@ -119,35 +119,13 @@ def require_authentication():
 
                     if datetime.now(timezone.utc) < trial_end:
                         return None
-    expected_password = os.environ.get("PARCEL_WEB_PASSWORD")
+    # Require customer login instead of legacy HTTP Basic Authentication.
+    if not current_user.is_authenticated:
+        return redirect(url_for("login"))
 
-    # Fail closed if the password has not been configured.
-    if not expected_password:
-        return Response("Server authentication is not configured.", status=503)
-
-    auth = request.authorization
-
-    tester_password = os.environ.get("PARCEL_TEST_PASSWORD")
-
-    admin_ok = (
-        auth is not None
-        and secrets.compare_digest(auth.username or "", "daniel")
-        and secrets.compare_digest(auth.password or "", expected_password)
-    )
-
-    tester_ok = (
-        auth is not None
-        and bool(tester_password)
-        and secrets.compare_digest(auth.username or "", "tester")
-        and secrets.compare_digest(auth.password or "", tester_password)
-    )
-
-    if not (admin_ok or tester_ok):
-        return Response(
-            "Authentication required.",
-            status=401,
-            headers={"WWW-Authenticate": 'Basic realm="Texas Photo-to-Parcel"'},
-        )
+    # Logged-in customers without an active subscription
+    # must subscribe before accessing protected features.
+    return redirect(url_for("subscribe"))
 #----------------------------------------------------------------------
 def sync_stripe_subscription(subscription):
     """Synchronize a verified Stripe subscription with a local user."""
@@ -530,8 +508,35 @@ def get_or_create_stripe_customer(stripe_client, user):
         "Unable to associate Stripe customer with user"
     )
 #----------------------------------------------------------------------
-@app.route("/subscribe", methods=["POST"])
+@app.route("/subscribe", methods=["GET", "POST"])
 def subscribe():
+    if request.method == "GET":
+        if not current_user.is_authenticated:
+            return redirect(url_for("login"))
+
+        if current_user.subscription_status in ("trialing", "active"):
+            return redirect(url_for("index"))
+
+        return """
+        <!doctype html>
+        <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Subscribe - Texas Parcel Mapper</title>
+        </head>
+        <body style="font-family:Arial;max-width:450px;margin:60px auto;padding:20px;">
+            <h1>Texas Parcel Mapper</h1>
+            <h2>30-Day Free Trial</h2>
+            <p>Then $19.99 per month. Cancel anytime.</p>
+            <p>A payment card is required to begin your trial.</p>
+            <form method="post" action="/subscribe">
+                <button type="submit">Start My Free Trial</button>
+            </form>
+        </body>
+        </html>
+        """
+
     if not current_user.is_authenticated:
         return Response("Please log in first.", status=401)
 
@@ -742,7 +747,7 @@ def login():
 
         login_user(user)
 
-        return Response("Login successful.", status=200)
+        return redirect(url_for("subscribe"))
 
     return """
     <!doctype html>
