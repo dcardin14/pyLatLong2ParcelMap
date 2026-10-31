@@ -687,6 +687,19 @@ def login():
 
         return redirect(url_for("subscribe"))
 
+    success_message = ""
+    if request.args.get("registered") == "1":
+        success_message = """
+        <div style="background:#e8f5e9;color:#176b35;
+                    padding:16px;border-radius:8px;
+                    margin-bottom:20px;">
+            <strong>Account created successfully!</strong>
+            <p style="margin-bottom:0;">
+                Please sign in to start your 30-day free trial.
+            </p>
+        </div>
+        """
+
     return """
     <!doctype html>
     <html lang="en">
@@ -697,6 +710,7 @@ def login():
     </head>
     <body style="font-family:Arial;max-width:450px;margin:60px auto;padding:20px;">
         <h1>Customer Login</h1>
+        {success_message}
         <form method="post" action="/login">
             <label>Email address</label>
             <input type="email" name="email" required
@@ -713,7 +727,7 @@ def login():
         <p><a href="/register">Create an account</a></p>
     </body>
     </html>
-    """
+    """.replace("{success_message}", success_message)
 #----------------------------------------------------------------------
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -743,10 +757,7 @@ def register():
             db.session.rollback()
             return Response("Account already exists.", status=409)
 
-        return Response(
-            "Account created successfully. Login will be available soon.",
-            status=201,
-        )
+        return redirect(url_for("login", registered="1"))
     return """
     <!doctype html>
     <html lang="en">
