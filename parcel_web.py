@@ -214,21 +214,7 @@ def stripe_webhook():
         "customer.subscription.updated",
         "customer.subscription.deleted",
     ):
-        subscription_id = event["data"]["object"]["id"]
-
-        try:
-            client = stripe.StripeClient(
-                os.environ["STRIPE_SECRET_KEY"]
-            )
-            subscription = client.v1.subscriptions.retrieve(
-                subscription_id
-            )
-        except (KeyError, stripe.StripeError):
-            app.logger.exception(
-                "Unable to retrieve Stripe subscription %s",
-                subscription_id
-            )
-            return Response("Subscription lookup failed.", status=503)
+        subscription = event["data"]["object"]
 
         if not sync_stripe_subscription(subscription):
             return Response("Subscription not synchronized.", status=503)
@@ -735,12 +721,6 @@ def subscribe():
 def billing():
     if not current_user.is_authenticated:
         return redirect(url_for("login"))
-
-    app.logger.warning(
-        "Billing diagnostic: user_id=%s, has_stripe_customer=%s",
-        current_user.id,
-        bool(current_user.stripe_customer_id),
-    )
 
     if not current_user.stripe_customer_id:
         return redirect(url_for("subscribe"))
