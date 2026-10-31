@@ -359,7 +359,7 @@ def create_map(gdf, parcel, lat, lon, county_name):
 
 
 def parse_coord(text):
-    """Convert decimal degrees or D/M/S (e.g. 27d56m43s, -99d32m22s) to decimal degrees."""
+    """Convert decimal degrees or D/M/S to decimal degrees."""
 
     s = text.strip().upper().replace("°", "D").replace("’", "'").replace("”", '"')
 
@@ -381,11 +381,23 @@ def parse_coord(text):
 
     sign, deg, minutes, seconds, hemi = m.groups()
 
-    value = (
-        float(deg)
-        + float(minutes or 0) / 60
-        + float(seconds or 0) / 3600
-    )
+    degrees = float(deg)
+    minutes = float(minutes or 0)
+    seconds = float(seconds or 0)
+
+    # Minutes and seconds must be less than 60.
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError("Minutes and seconds must be less than 60.")
+
+    # Reject conflicting mathematical signs and compass directions.
+    if sign and hemi:
+        sign_negative = sign == "-"
+        hemi_negative = hemi in ("S", "W")
+
+        if sign_negative != hemi_negative:
+            raise ValueError("Conflicting coordinate sign and direction.")
+
+    value = degrees + minutes / 60 + seconds / 3600
 
     if sign == "-" or hemi in ("S", "W"):
         value = -value

@@ -136,286 +136,264 @@ def require_authentication():
     # must subscribe before accessing protected features.
     return redirect(url_for("subscribe"))
 #----------------------------------------------------------------------
-def sync_stripe_subscription(subscription):
-    """Synchronize a verified Stripe subscription with a local user."""
-    from datetime import datetime, timezone
+def stripe_customer_subscriptions(stripe_client, customer_id):
+    """Read all subscriptions, including historical canceled subscriptions."""
+    response = stripe_client.v1.subscriptions.list(
+        params={"customer": customer_id, "status": "all", "limit": 100}
+    )
+    return list(response.auto_paging_iter())
 
-    user_id = subscription.metadata.get("user_id")
 
-    if not user_id:
-        app.logger.warning(
-            "Subscription %s has no user_id metadata",
-            subscription.id
-        )
+def has_open_stripe_subscription(stripe_client, customer_id):
+    """A scheduled cancellation is still an open subscription."""
+    return any(
+        sub.status != "canceled"
+        for sub in stripe_customer_subscriptions(stripe_client, customer_id)
+    )
+
+
+def checkout_session_subscription_id(session):
+    subscription = getattr(session, "subscription", None)
+    return getattr(subscription, "id", subscription)
+
+
+def verify_replacement_checkout(stripe_client, user, subscription):
+    """Only the current saved Checkout session may replace a canceled ID.
+
+    If a webhook arrives before Checkout has been saved, return False so
+    Stripe retries instead of acknowledging an unrecorded subscription.
+    """
+    if (
+        user.subscription_status != "canceled"
+        or not user.trial_used
+        or not user.stripe_checkout_session_id
+        or not user.stripe_checkout_attempt_id
+    ):
         return False
 
+    session = stripe_client.v1.checkout.sessions.retrieve(
+        user.stripe_checkout_session_id
+    )
+    return (
+        str(session.client_reference_id) == str(user.id)
+        and session.customer == user.stripe_customer_id
+        and session.status == "complete"
+        and checkout_session_subscription_id(session) == subscription.id
+        and subscription.status in ("active", "trialing")
+    )
+
+
+def sync_stripe_subscription(subscription):
+    """Apply Stripe's current subscription state, never stale event snapshots."""
+    from datetime import datetime, timezone
+
+    metadata = getattr(subscription, "metadata", None) or {}
     try:
-        user_id = int(user_id)
-    except (TypeError, ValueError):
+        user_id = int(metadata.get("user_id"))
+    except (ValueError, TypeError):
+        app.logger.error("Stripe subscription missing valid user metadata")
         return False
 
     user = db.session.get(User, user_id)
-
     if user is None:
-        app.logger.warning("Stripe user %s not found", user_id)
         return False
 
-    customer_id = subscription.customer
-    if not isinstance(customer_id, str):
-        customer_id = customer_id.id
-
+    customer_id = getattr(subscription.customer, "id", subscription.customer)
     if user.stripe_customer_id not in (None, customer_id):
-        app.logger.error("Conflicting Stripe customer for user %s", user_id)
+        app.logger.error("Stripe customer mismatch for user %s", user_id)
         return False
 
-    if user.stripe_subscription_id not in (None, subscription.id):
-        app.logger.error("Conflicting Stripe subscription for user %s", user_id)
+    client = stripe.StripeClient(os.environ["STRIPE_SECRET_KEY"])
+
+    # Retrieve the latest state. An older 'created' or 'updated' event must
+    # not reactivate a subscription that Stripe has since canceled.
+    try:
+        current = client.v1.subscriptions.retrieve(subscription.id)
+    except stripe.StripeError:
+        if subscription.status != "canceled":
+            raise  # Retry temporary Stripe failures.
+        # A signed deletion payload is usable when a deleted subscription
+        # can no longer be retrieved.
+        current = subscription
+
+    current_customer = getattr(current.customer, "id", current.customer)
+    if current_customer != customer_id:
         return False
+
+    previous_id = user.stripe_subscription_id
+    if previous_id not in (None, current.id):
+        if user.subscription_status != "canceled":
+            # A different subscription cannot displace an active record.
+            app.logger.info("Ignoring historical subscription %s", current.id)
+            return True
+
+        if not verify_replacement_checkout(client, user, current):
+            # An event may precede Checkout completion or saving its ID.
+            # Retry only when it could belong to the pending Checkout.
+            if user.stripe_checkout_attempt_id:
+                if not user.stripe_checkout_session_id:
+                    return False
+                pending = client.v1.checkout.sessions.retrieve(
+                    user.stripe_checkout_session_id
+                )
+                if checkout_session_subscription_id(pending) == current.id:
+                    return False
+            # Otherwise this is an unrelated or historical subscription.
+            app.logger.info("Ignoring non-current subscription %s", current.id)
+            return True
+
+    # While a replacement Checkout is underway, the old subscription remains
+    # canceled even if a stale webhook for it arrives.
+    if (
+        previous_id == current.id
+        and user.subscription_status == "canceled"
+        and user.stripe_checkout_attempt_id
+        and current.status == "canceled"
+    ):
+        return True
 
     user.stripe_customer_id = customer_id
-    user.stripe_subscription_id = subscription.id
-    user.subscription_status = subscription.status
-
+    user.stripe_subscription_id = current.id
+    user.subscription_status = current.status
+    if current.status == "trialing" or current.trial_end:
+        user.trial_used = True
     user.trial_ends_at = (
-        datetime.fromtimestamp(subscription.trial_end, timezone.utc)
-        if subscription.trial_end else None
+        datetime.fromtimestamp(current.trial_end, timezone.utc)
+        if current.trial_end else None
     )
-
     db.session.commit()
-
-    app.logger.warning(
-        "Synchronized subscription %s: %s",
-        subscription.id,
-        subscription.status
-    )
+    app.logger.info("Synchronized subscription %s: %s", current.id, current.status)
     return True
-#----------------------------------------------------------------------
+
+
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
-
     if not secret:
         return Response("Webhook not configured.", status=503)
 
-    payload = request.get_data()
-    signature = request.headers.get("Stripe-Signature", "")
-
     try:
         event = stripe.Webhook.construct_event(
-            payload, signature, secret
+            request.get_data(), request.headers.get("Stripe-Signature", ""), secret
         )
     except (ValueError, stripe.SignatureVerificationError):
         return Response("Invalid webhook signature.", status=400)
 
-    # app.logger.info("Verified Stripe event: %s", event["type"])
-    app.logger.warning("Verified Stripe event: %s", event["type"])
     if event["type"] in (
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
     ):
-        subscription = event["data"]["object"]
-
-        if not sync_stripe_subscription(subscription):
+        try:
+            synchronized = sync_stripe_subscription(event["data"]["object"])
+        except Exception:
+            app.logger.exception("Stripe subscription synchronization failed")
+            return Response("Subscription synchronization unavailable.", status=503)
+        if not synchronized:
             return Response("Subscription not synchronized.", status=503)
-
     return Response("Webhook received.", status=200)
-#----------------------------------------------------------------------
-def release_checkout_attempt(user_id, attempt_id):
-    """Release a Checkout claim only if it still belongs to this attempt."""
-    from sqlalchemy import update
 
-    result = db.session.execute(
-        update(User)
-        .where(
-            User.id == user_id,
-            User.stripe_checkout_attempt_id == attempt_id,
-            User.stripe_checkout_session_id.is_(None),
-            User.stripe_subscription_id.is_(None),
-        )
-        .values(
-            stripe_checkout_attempt_id=None,
-            stripe_checkout_attempt_started_at=None
-        )
-        .execution_options(synchronize_session=False)
-    )
 
-    db.session.commit()
-    return result.rowcount == 1
-#----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 def checkout_attempt_age_seconds(started_at):
-    """Return the age of a Checkout attempt in seconds."""
     from datetime import datetime, timezone
-
     if started_at is None:
         return None
-
-    # SQLite may return timestamps without timezone information.
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
+    return max(0, (datetime.now(timezone.utc) - started_at).total_seconds())
 
-    age = (
-        datetime.now(timezone.utc) - started_at
-    ).total_seconds()
 
-    return max(0, age)
-#----------------------------------------------------------------------
 def checkout_attempt_needs_recovery(started_at):
-    """Identify an old Checkout attempt for investigation."""
     age = checkout_attempt_age_seconds(started_at)
+    return age is None or age >= 120
 
-    if age is None:
-        return True
 
-    return age >= 120
-#----------------------------------------------------------------------
-def inspect_checkout_session(session, user_id):
-    """Classify a Stripe Checkout session for a particular user."""
-    from datetime import datetime, timezone
-
-    if str(session.client_reference_id) != str(user_id):
-        return "wrong_user"
-
-    if session.subscription:
-        return "subscription_exists"
-
-    if session.status == "complete":
-        return "completed"
-
-    if session.status == "open":
-        if not session.url or not session.expires_at:
-            return "unusable"
-
-        if session.expires_at <= datetime.now(timezone.utc).timestamp():
-            return "expired"
-
-        return "reusable"
-
-    if session.status == "expired":
-        return "expired"
-
-    return "unknown"
-#----------------------------------------------------------------------
-def decide_checkout_recovery(sessions, user_id):
-    """Choose a safe action based on existing Checkout sessions."""
-
-    classifications = [
-        (session, inspect_checkout_session(session, user_id))
-        for session in sessions
-    ]
-
-    # An existing subscription takes priority over any open session.
-    if any(
-        result == "subscription_exists"
-        for _, result in classifications
-    ):
-        return "verify_subscription", None
-
-    # Completed sessions must be investigated before proceeding.
-    if any(
-        result == "completed"
-        for _, result in classifications
-    ):
-        return "verify_completed", None
-
-    # Unknown or unusable sessions require investigation.
-    if any(
-        result in ("unknown", "unusable", "wrong_user")
-        for _, result in classifications
-    ):
-        return "investigate", None
-
-    # Reuse an existing, unexpired Checkout session.
-    for session, result in classifications:
-        if result == "reusable":
-            return "reuse", session
-
-    # No reusable session was identified.
-    return "no_reusable_session", None
-#----------------------------------------------------------------------
 def find_customer_checkout_sessions(stripe_client, user):
-    """Find Checkout sessions associated with a known Stripe customer."""
-
     if not user.stripe_customer_id:
         return []
-
-    matches = []
-
-    try:
-        sessions = stripe_client.v1.checkout.sessions.list(
-            params={
-                "customer": user.stripe_customer_id,
-                "limit": 100,
-            }
-        )
-
-        for session in sessions.auto_paging_iter():
-            if str(session.client_reference_id) == str(user.id):
-                matches.append(session)
-
-    except Exception:
-        app.logger.exception(
-            "Unable to reconcile Checkout sessions for user %s",
-            user.id
-        )
-        raise
-
-    return matches
-#----------------------------------------------------------------------
-def customer_has_stripe_subscription(stripe_client, customer_id):
-    """Check Stripe for any existing subscription, including canceled ones."""
-    subscriptions = stripe_client.v1.subscriptions.list(
-        params={
-            "customer": customer_id,
-            "status": "all",
-            "limit": 1,
-        }
+    response = stripe_client.v1.checkout.sessions.list(
+        params={"customer": user.stripe_customer_id, "limit": 100}
     )
-    return bool(subscriptions.data)
-#----------------------------------------------------------------------
-def reconcile_customer_checkout(stripe_client, user):
-    """Inspect existing Checkout sessions for a known Stripe customer."""
+    return [
+        session for session in response.auto_paging_iter()
+        if str(session.client_reference_id) == str(user.id)
+    ]
 
-    if not user.stripe_customer_id:
-        return "customer_unknown", None
 
-    if customer_has_stripe_subscription(
-        stripe_client, user.stripe_customer_id
-    ):
-        return "verify_subscription", None
-
-    sessions = find_customer_checkout_sessions(
-        stripe_client, user
+def get_or_create_stripe_customer(stripe_client, user):
+    if user.stripe_customer_id:
+        return user.stripe_customer_id
+    customer = stripe_client.v1.customers.create(
+        {"email": user.email, "metadata": {"user_id": str(user.id)}},
+        options={"idempotency_key": f"parcel-customer-{user.id}"},
     )
-
-    return decide_checkout_recovery(
-        sessions, user.id
-    )
-#----------------------------------------------------------------------
-def checkout_recovery_action(attempt_id, started_at):
-    """Decide how to handle an existing Checkout attempt."""
-    if not attempt_id:
-        return "new"
-
-    if not checkout_attempt_needs_recovery(started_at):
-        return "wait"
-
-    # An old attempt requires Stripe reconciliation.
-    # Never automatically create a new attempt here.
-    return "reconcile"
-
-#----------------------------------------------------------------------
-def clear_expired_checkout_session(user_id, session_id, attempt_id):
-    """Clear a Checkout session only if its ID has not changed."""
     from sqlalchemy import update
+    result = db.session.execute(
+        update(User)
+        .where(User.id == user.id, User.stripe_customer_id.is_(None))
+        .values(stripe_customer_id=customer.id)
+        .execution_options(synchronize_session=False)
+    )
+    db.session.commit()
+    db.session.refresh(user)
+    if user.stripe_customer_id != customer.id:
+        raise RuntimeError("Conflicting Stripe customer")
+    return customer.id
 
+
+def prepare_canceled_checkout(stripe_client, user):
+    """Clear only the old completed session, never a pending new Checkout."""
+    from sqlalchemy import update
+    if (
+        user.subscription_status != "canceled"
+        or not user.trial_used
+        or not user.stripe_subscription_id
+        or not user.stripe_customer_id
+    ):
+        return False
+
+    # Never permit a replacement while any subscription is still open.
+    subscriptions = stripe_customer_subscriptions(
+        stripe_client, user.stripe_customer_id
+    )
+    if any(sub.status != "canceled" for sub in subscriptions):
+        return False
+    if not any(
+        sub.id == user.stripe_subscription_id and sub.status == "canceled"
+        for sub in subscriptions
+    ):
+        return False
+
+    old_session_id = user.stripe_checkout_session_id
+    old_attempt_id = user.stripe_checkout_attempt_id
+    if old_session_id:
+        session = stripe_client.v1.checkout.sessions.retrieve(old_session_id)
+        if (
+            str(session.client_reference_id) != str(user.id)
+            or session.customer != user.stripe_customer_id
+        ):
+            return False
+        # A new Checkout is pending or completed: do not erase its lock.
+        if checkout_session_subscription_id(session) != user.stripe_subscription_id:
+            return True
+        if session.status != "complete":
+            return False
+    elif old_attempt_id:
+        # An attempt without a saved session may still be in progress.
+        return True
+    else:
+        return True
+
+    # Compare-and-swap prevents a concurrent POST from erasing a new attempt.
     result = db.session.execute(
         update(User)
         .where(
-            User.id == user_id,
-            User.stripe_checkout_session_id == session_id,
-            User.stripe_checkout_attempt_id == attempt_id,
-            User.stripe_subscription_id.is_(None),
+            User.id == user.id,
+            User.subscription_status == "canceled",
+            User.stripe_subscription_id == user.stripe_subscription_id,
+            User.stripe_checkout_session_id == old_session_id,
+            User.stripe_checkout_attempt_id == old_attempt_id,
         )
         .values(
             stripe_checkout_session_id=None,
@@ -424,299 +402,235 @@ def clear_expired_checkout_session(user_id, session_id, attempt_id):
         )
         .execution_options(synchronize_session=False)
     )
-
     db.session.commit()
+    db.session.refresh(user)
     return result.rowcount == 1
-#----------------------------------------------------------------------
-def claim_checkout_attempt(user_id, attempt_id):
-    """Atomically claim an available Checkout attempt."""
-    from sqlalchemy import update
-    from datetime import datetime, timezone
 
-    started_at = datetime.now(timezone.utc)
+
+def claim_checkout_attempt(user_id, attempt_id):
+    """Only one concurrent POST can claim a new Checkout attempt."""
+    from sqlalchemy import update, or_, and_
+    from datetime import datetime, timezone
     result = db.session.execute(
         update(User)
         .where(
             User.id == user_id,
-            User.stripe_subscription_id.is_(None),
             User.stripe_checkout_attempt_id.is_(None),
+            User.stripe_checkout_session_id.is_(None),
+            or_(
+                and_(
+                    User.stripe_subscription_id.is_(None),
+                    User.subscription_status.notin_(("active", "trialing")),
+                ),
+                and_(
+                    User.subscription_status == "canceled",
+                    User.trial_used.is_(True),
+                    User.stripe_subscription_id.is_not(None),
+                ),
+            ),
         )
         .values(
             stripe_checkout_attempt_id=attempt_id,
-            stripe_checkout_attempt_started_at=started_at
+            stripe_checkout_attempt_started_at=datetime.now(timezone.utc),
         )
         .execution_options(synchronize_session=False)
     )
-
-    claimed = result.rowcount == 1
     db.session.commit()
+    return result.rowcount == 1
 
-    return claimed
 
-#----------------------------------------------------------------------
-def create_stripe_customer(stripe_client, user):
-    """Create a Stripe customer associated with a Parcel Mapper user."""
-    return stripe_client.v1.customers.create(
-        {
-            "email": user.email,
-            "metadata": {"user_id": str(user.id)},
-        },
-        options={
-            "idempotency_key": f"parcel-customer-{user.id}"
-        }
-    )
-#----------------------------------------------------------------------
-def save_stripe_customer_id(user_id, customer_id):
-    """Save a Stripe customer ID without overwriting an existing one."""
+def release_checkout_attempt(user_id, attempt_id):
+    """Release only an attempt that has no recorded Checkout session."""
     from sqlalchemy import update
-
     result = db.session.execute(
         update(User)
         .where(
             User.id == user_id,
-            User.stripe_customer_id.is_(None)
+            User.stripe_checkout_attempt_id == attempt_id,
+            User.stripe_checkout_session_id.is_(None),
         )
-        .values(stripe_customer_id=customer_id)
+        .values(
+            stripe_checkout_attempt_id=None,
+            stripe_checkout_attempt_started_at=None,
+        )
         .execution_options(synchronize_session=False)
     )
-
     db.session.commit()
     return result.rowcount == 1
-#----------------------------------------------------------------------
-def get_or_create_stripe_customer(stripe_client, user):
-    """Reuse an existing Stripe customer or create one if necessary."""
-    if user.stripe_customer_id:
-        return user.stripe_customer_id
 
-    customer = create_stripe_customer(stripe_client, user)
 
-    if save_stripe_customer_id(user.id, customer.id):
-        return customer.id
-
-    # Another request may have saved a customer ID first.
-    db.session.refresh(user)
-
-    if user.stripe_customer_id:
-        return user.stripe_customer_id
-
-    raise RuntimeError(
-        "Unable to associate Stripe customer with user"
+def reset_expired_checkout(stripe_client, user, session):
+    """Clear an expired attempt only after verifying no subscription exists."""
+    from sqlalchemy import update
+    if session.status != "expired" or checkout_session_subscription_id(session):
+        return False
+    if user.stripe_customer_id and has_open_stripe_subscription(
+        stripe_client, user.stripe_customer_id
+    ):
+        return False
+    # Another open Checkout could already exist for this customer.
+    for candidate in find_customer_checkout_sessions(stripe_client, user):
+        if candidate.id != session.id and candidate.status == "open":
+            return False
+        if candidate.id != session.id and checkout_session_subscription_id(candidate):
+            # Historical canceled subscriptions are okay; live ones were
+            # already rejected by the subscription check above.
+            continue
+    result = db.session.execute(
+        update(User)
+        .where(
+            User.id == user.id,
+            User.stripe_checkout_session_id == session.id,
+            User.stripe_checkout_attempt_id == user.stripe_checkout_attempt_id,
+            User.subscription_status.notin_(("active", "trialing")),
+        )
+        .values(
+            stripe_checkout_session_id=None,
+            stripe_checkout_attempt_id=None,
+            stripe_checkout_attempt_started_at=None,
+        )
+        .execution_options(synchronize_session=False)
     )
-#----------------------------------------------------------------------
+    db.session.commit()
+    db.session.refresh(user)
+    return result.rowcount == 1
+
+
+def recover_missing_checkout(stripe_client, user):
+    """Find a session when Stripe creation succeeded but saving it failed."""
+    if not user.stripe_customer_id:
+        return None
+    sessions = find_customer_checkout_sessions(stripe_client, user)
+    # A matching open session is reusable; never create a second one.
+    open_sessions = [s for s in sessions if s.status == "open"]
+    if len(open_sessions) == 1:
+        return open_sessions[0]
+    return None
+
+
 @app.route("/subscribe", methods=["GET", "POST"])
 def subscribe():
-    if request.method == "GET":
-        if not current_user.is_authenticated:
-            return redirect(url_for("login"))
+    if not current_user.is_authenticated:
+        return redirect(url_for("login"))
 
+    if request.method == "GET":
         if current_user.subscription_status in ("trialing", "active"):
             return redirect(url_for("index"))
-
-        return """
-        <!doctype html>
-        <html lang="en">
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Subscribe - Texas Parcel Mapper</title>
-        </head>
+        if current_user.trial_used:
+            heading = "Restart Your Subscription"
+            description = "$19.99 per month, starting today. Cancel anytime."
+            button_text = "Subscribe for $19.99/Month"
+        else:
+            heading = "30-Day Free Trial"
+            description = "Then $19.99 per month. Cancel anytime."
+            button_text = "Start My Free Trial"
+        return f"""<!doctype html><html lang="en"><head>
+        <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Subscribe - Texas Parcel Mapper</title></head>
         <body style="font-family:Arial;max-width:450px;margin:60px auto;padding:20px;">
-            <h1>Texas Parcel Mapper</h1>
-            <h2>30-Day Free Trial</h2>
-            <p>Then $19.99 per month. Cancel anytime.</p>
-            <p>A payment card is required to begin your trial.</p>
-            <form method="post" action="/subscribe">
-                <button type="submit">Start My Free Trial</button>
-            </form>
-        </body>
-        </html>
-        """
+        <h1>Texas Parcel Mapper</h1><h2>{heading}</h2>
+        <p>{description}</p><p>A payment card is required to subscribe.</p>
+        <form method="post" action="/subscribe">
+        <button type="submit">{button_text}</button></form></body></html>"""
 
-    if not current_user.is_authenticated:
-        return Response("Please log in first.", status=401)
-
-    # Prevent repeat trials and duplicate Checkout attempts
-    # when a subscription is already recorded locally.
-    if current_user.stripe_subscription_id:
-        return Response(
-            "This account already has a subscription record.",
-            status=409
-        )
-
-    if current_user.subscription_status in ("trialing", "active"):
-        return Response(
-            "You already have a subscription.",
-            status=409
-        )
+    if current_user.subscription_status in ("active", "trialing"):
+        return Response("You already have a subscription.", status=409)
 
     secret_key = os.environ.get("STRIPE_SECRET_KEY")
     price_id = os.environ.get("STRIPE_PRICE_ID")
-
     if not secret_key or not price_id:
         return Response("Stripe is not configured.", status=503)
-
     client = stripe.StripeClient(secret_key)
-    # Generate an identifier for this Checkout attempt.
-    attempt_id = str(uuid.uuid4())
-    # Reuse an existing, unexpired Checkout session.
-    if current_user.stripe_checkout_session_id:
-        try:
-            existing_session = client.v1.checkout.sessions.retrieve(
+
+    try:
+        if current_user.stripe_subscription_id:
+            if not prepare_canceled_checkout(client, current_user):
+                return Response("Previous subscription requires verification.", status=409)
+        elif current_user.stripe_customer_id:
+            if has_open_stripe_subscription(client, current_user.stripe_customer_id):
+                return Response("Existing Stripe subscription requires verification.", status=409)
+
+        # Existing saved Checkout: reuse it, never start another one.
+        if current_user.stripe_checkout_session_id:
+            session = client.v1.checkout.sessions.retrieve(
                 current_user.stripe_checkout_session_id
             )
-
-            session_state = inspect_checkout_session(
-                existing_session, current_user.id
-            )
-
-            if session_state == "reusable":
-                return redirect(existing_session.url, code=303)
-            
-            # Expired sessions must be reconciled with Stripe before
-            # clearing the saved session and its Checkout attempt lock.
-            # Refresh current_user after any successful database reset.
-            if session_state == "expired":
-                if not current_user.stripe_customer_id:
-                    return Response(
-                        "Unable to verify the Stripe customer.",
-                        status=409
-                    )
-
-                try:
-                    recovery_action, recovered_session = reconcile_customer_checkout(
-                        client, current_user
-                    )
-                except Exception:
-                    app.logger.exception(
-                        "Expired Checkout reconciliation failed for user %s",
-                        current_user.id
-                    )
-                    return Response(
-                        "Unable to verify previous Checkout. Please try later.",
-                        status=503
-                    )
-
-                if recovery_action == "reuse":
-                    return redirect(recovered_session.url, code=303)
-
+            if str(session.client_reference_id) != str(current_user.id):
+                return Response("Checkout ownership mismatch.", status=409)
+            if session.status == "open" and not checkout_session_subscription_id(session):
+                return redirect(session.url, code=303)
+            if session.status == "expired":
+                if not reset_expired_checkout(client, current_user, session):
+                    return Response("Checkout recovery needs verification.", status=409)
+            else:
                 return Response(
-                    "Checkout recovery requires verification before retrying.",
-                    status=409
+                    "Checkout completed or requires subscription synchronization. "
+                    "Please refresh shortly.", status=409
                 )
 
+        # An attempt without a saved session may have timed out.
+        if current_user.stripe_checkout_attempt_id:
+            if not checkout_attempt_needs_recovery(
+                current_user.stripe_checkout_attempt_started_at
+            ):
+                return Response("Checkout is starting. Please retry shortly.", status=409)
+            recovered = recover_missing_checkout(client, current_user)
+            if recovered:
+                return redirect(recovered.url, code=303) if recovered.status == "open" else Response(
+                    "Checkout requires synchronization.", status=409
+                )
+            # Fail closed: a timed-out API call could still have created a
+            # Checkout session that is not yet visible to this search.
             return Response(
-                "Existing Checkout session requires verification. "
-                "Please contact support.",
-                status=409
+                "Unable to confirm the earlier Checkout attempt. "
+                "Please contact support before retrying.", status=409
             )
 
-        except stripe.StripeError:
-            app.logger.exception(
-                "Unable to retrieve existing Checkout session"
-            )
-            return Response(
-                "Unable to verify existing checkout.",
-                status=502
-            )
-        # Check whether a previous Checkout attempt needs attention.
-    action = checkout_recovery_action(
-        current_user.stripe_checkout_attempt_id,
-        current_user.stripe_checkout_attempt_started_at
-    )
+        attempt_id = str(uuid.uuid4())
+        if not claim_checkout_attempt(current_user.id, attempt_id):
+            return Response("Checkout is already being started.", status=409)
+        db.session.refresh(current_user)
 
-    if action == "wait":
-        return Response(
-            "Checkout is already being started. "
-            "Please wait a moment and try again.",
-            status=409
-        )
-
-    if action == "reconcile":
-        try:
-            recovery_action, existing_session = (
-                reconcile_customer_checkout(client, current_user)
-            )
-        except stripe.StripeError:
-            app.logger.exception(
-                "Stripe Checkout reconciliation failed for user %s",
-                current_user.id
-            )
-            return Response(
-                "Unable to verify earlier Checkout. Please try later.",
-                status=503
-            )
-        except Exception:
-            app.logger.exception(
-                "Unexpected Checkout reconciliation error for user %s",
-                current_user.id
-            )
-            return Response(
-                "Unable to verify earlier Checkout. Please try later.",
-                status=503
-            )
-        if recovery_action == "reuse":
-            return redirect(existing_session.url, code=303)
-
-        return Response(
-            "An earlier Checkout attempt needs verification. "
-            "Please contact support.",
-            status=409
-        )
-    # Only one request may claim the right to create Checkout.
-    if not claim_checkout_attempt(current_user.id, attempt_id):
-        return Response(
-            "Checkout is already being started for this account. "
-            "Please wait and try again.",
-            status=409
-        )
-    try:
-        customer_id = get_or_create_stripe_customer(
-            client, current_user
-        )
-
-        session = client.v1.checkout.sessions.create({
-            "mode": "subscription",
-            "line_items": [{"price": price_id, "quantity": 1}],
-            "customer": customer_id,
-            "client_reference_id": str(current_user.id),
-            "payment_method_collection": "always",
-            "subscription_data": {
-                "trial_period_days": 30,
-                "metadata": {"user_id": str(current_user.id)},
+        customer_id = get_or_create_stripe_customer(client, current_user)
+        subscription_data = {"metadata": {"user_id": str(current_user.id)}}
+        if not current_user.trial_used:
+            subscription_data["trial_period_days"] = 30
+        session = client.v1.checkout.sessions.create(
+            {
+                "mode": "subscription",
+                "line_items": [{"price": price_id, "quantity": 1}],
+                "customer": customer_id,
+                "client_reference_id": str(current_user.id),
+                "payment_method_collection": "always",
+                "subscription_data": subscription_data,
+                "success_url": url_for("login", _external=True) + "?checkout=success",
+                "cancel_url": url_for("login", _external=True) + "?checkout=cancelled",
             },
-            "success_url": url_for("login", _external=True)
-                + "?checkout=success",
-            "cancel_url": url_for("login", _external=True)
-                + "?checkout=cancelled",
-        }, options={
-            "idempotency_key": f"checkout-{attempt_id}"
-        })
-    except stripe.StripeError:
-        app.logger.exception("Stripe Checkout creation failed")
-        return Response("Unable to start checkout.", status=502)
-    except Exception:
-        db.session.rollback()
-        app.logger.exception(
-            "Unexpected customer or Checkout creation failure for user %s",
-            current_user.id
+            options={"idempotency_key": f"checkout-{attempt_id}"},
         )
-        return Response(
-            "Unable to start checkout. Please try again later.",
-            status=503
+        # Compare-and-swap: never overwrite a newer Checkout session.
+        from sqlalchemy import update
+        saved = db.session.execute(
+            update(User)
+            .where(
+                User.id == current_user.id,
+                User.stripe_checkout_attempt_id == attempt_id,
+                User.stripe_checkout_session_id.is_(None),
+            )
+            .values(stripe_checkout_session_id=session.id)
+            .execution_options(synchronize_session=False)
         )
-    # Remember this Checkout session so it can be reused.
-    try:
-        current_user.stripe_checkout_session_id = session.id
         db.session.commit()
+        if saved.rowcount != 1:
+            return Response("Checkout session requires reconciliation.", status=503)
+        return redirect(session.url, code=303)
     except Exception:
         db.session.rollback()
-        app.logger.exception("Unable to save Checkout session")
-        return Response(
-            "Unable to save checkout information.",
-            status=500
-        )
-    return redirect(session.url, code=303)
-#----------------------------------------------------------------------
+        app.logger.exception("Unable to start or recover Stripe Checkout")
+        return Response("Unable to verify Checkout. Please try later.", status=503)
+
+
+# ----------------------------------------------------------------------
 @app.route("/billing")
 def billing():
     if not current_user.is_authenticated:
