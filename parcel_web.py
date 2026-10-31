@@ -724,8 +724,24 @@ def login():
 
             <button type="submit">Sign In</button>
         </form>
-        <p><a href="/register">Create an account</a></p>
-    </body>
+        <div style="display:flex;align-items:center;gap:12px;margin:28px 0 18px;">
+            <div style="flex:1;border-top:1px solid #ccc;"></div>
+            <span style="font-size:12px;color:#666;text-align:center;">
+                NEW TO TEXAS PARCEL MAPPER?
+            </span>
+            <div style="flex:1;border-top:1px solid #ccc;"></div>
+        </div>
+
+        <a href="/register"
+           style="display:block;background:#1769aa;color:white;
+                  padding:16px;text-align:center;border-radius:8px;
+                  font-size:18px;font-weight:bold;text-decoration:none;">
+            Create an Account
+        </a>
+
+        <p style="text-align:center;color:#555;font-size:14px;">
+            Start your 30-day free trial
+        </p>    </body>
     </html>
     """.replace("{success_message}", success_message)
 #----------------------------------------------------------------------
