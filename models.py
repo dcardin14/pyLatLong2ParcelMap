@@ -63,6 +63,13 @@ class User(UserMixin, db.Model):
         nullable=True
     )
 
+    trial_used = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False,
+        server_default="false"
+    )
+
     created_at = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
