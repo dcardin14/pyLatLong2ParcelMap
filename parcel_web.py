@@ -730,6 +730,35 @@ def subscribe():
         )
     return redirect(session.url, code=303)
 #----------------------------------------------------------------------
+@app.route("/billing")
+def billing():
+    if not current_user.is_authenticated:
+        return redirect(url_for("login"))
+
+    if not current_user.stripe_customer_id:
+        return redirect(url_for("subscribe"))
+
+    secret_key = os.environ.get("STRIPE_SECRET_KEY")
+    if not secret_key:
+        return Response("Billing is unavailable.", status=503)
+
+    try:
+        client = stripe.StripeClient(secret_key)
+
+        session = client.v1.billing_portal.sessions.create({
+            "customer": current_user.stripe_customer_id,
+            "return_url": url_for("subscribe", _external=True),
+        })
+
+    except stripe.StripeError:
+        app.logger.exception("Unable to open billing portal")
+        return Response(
+            "Unable to open billing portal. Please try again.",
+            status=502,
+        )
+
+    return redirect(session.url, code=303)
+#----------------------------------------------------------------------
 
 @app.route("/logout", methods=["POST"])
 def logout():
@@ -898,6 +927,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem;
 button:disabled{opacity:.6;cursor:wait}
 </style></head><body><main>
 <h1>Texas Photo-to-Parcel</h1>
+<p>
+    <a href="{{ url_for('billing') }}">Manage Subscription</a>
+</p>
 <p>Upload an <strong>original GPS-tagged photograph</strong>. Your existing Python program will identify the parcel and generate an ownership map.</p>
 <form id="parcel_form" method="post" enctype="multipart/form-data">
 <label for="photo"><strong>Select original photograph</strong></label>
