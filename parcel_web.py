@@ -919,7 +919,10 @@ document.getElementById("parcel_form").addEventListener("submit", function() {
     const button = document.getElementById("submit_button");
     const status = document.getElementById("processing_status");
     const timer = document.getElementById("processing_timer");
-
+    // Clear previous errors before processing a new request.
+    document.querySelectorAll(".error").forEach(function(element) {
+        element.hidden = true;
+    });
     status.hidden = false;
     button.disabled = true;
     button.textContent = "Processing...";
@@ -961,6 +964,14 @@ function usePhoneLocation() {
         {enableHighAccuracy: true, timeout: 15000, maximumAge: 0}
     );
 }
+window.addEventListener("pageshow", function() {
+    document.getElementById("processing_status").hidden = true;
+
+    const button = document.getElementById("submit_button");
+    button.disabled = false;
+    button.textContent = "Identify parcel";
+});
+
 </script>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if result %}
@@ -1277,8 +1288,7 @@ This may not be the correct property.
     </p>
 </div>
 {% endif %}
-<p class="muted">Local-network prototype. GPS identifies the camera position, which may not be the photographed property. Appraisal/GIS ownership is preliminary, not a title opinion. Do not publish this server to the internet.</p>
-</main></body></html>"""
+<p class="muted">GPS identifies the camera's location, which may differ from the photographed property. Parcel boundaries and ownership information are based on appraisal/GIS records and should be independently verified. This service does not provide a title opinion.</p></main></body></html>"""
 
 
 def purge_old_results():
