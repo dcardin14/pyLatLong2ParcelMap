@@ -858,8 +858,7 @@ button:disabled{opacity:.6;cursor:wait}
 <p>
     <a href="{{ url_for('billing') }}">Manage Subscription</a>
 </p>
-<p>Upload an <strong>original GPS-tagged photograph</strong>. Your existing Python program will identify the parcel and generate an ownership map.</p>
-<form id="parcel_form" method="post" enctype="multipart/form-data">
+<p>Upload a <strong>GPS-tagged photo</strong> or use your <strong>current location</strong>, then click <strong>Identify Parcel</strong> to generate a map showing the parcel and its ownership information.</p><form id="parcel_form" method="post" enctype="multipart/form-data">
 <label for="photo"><strong>Select original photograph</strong></label>
 <input id="photo" type="file" name="photo" accept="image/jpeg,image/heic,image/heif,image/tiff">
 <input type="hidden" id="phone_lat" name="phone_lat">
