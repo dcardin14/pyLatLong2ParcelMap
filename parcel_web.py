@@ -37,6 +37,14 @@ BASE = Path(__file__).resolve().parent
 MAX_BYTES = 25 * 1024 * 1024
 app = Flask(__name__)
 
+import os
+
+os.environ["PATH"] = (
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+    + os.pathsep
+    + os.environ.get("PATH", "")
+)
+
 app.config["MAX_CONTENT_LENGTH"] = MAX_BYTES
 
 # Use a persistent secret for login sessions.
