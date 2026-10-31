@@ -262,3 +262,8 @@ scratchpad.txt
 
 # PDF documents
 *.pdf
+# Local customer databases
+instance/
+*.db
+*.sqlite
+*.sqlite3

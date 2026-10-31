@@ -5,3 +5,7 @@ requests>=2.31,<3
 flask>=3.1,<4
 gunicorn>=23,<24
 pyogrio>=0.10,<1
+Flask-SQLAlchemy>=3.1,<4
+Flask-Login>=0.6,<1
+psycopg[binary]>=3.3,<4
+stripe>=14,<15
