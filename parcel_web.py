@@ -96,8 +96,9 @@ RESULT_TTL = 60 * 60
 def require_authentication():
     # These pages must be accessible without an existing account.
     public_endpoints = {
-    "register", "login", "logout",
-    "subscribe", "stripe_webhook", "static"
+        "register", "login", "logout",
+        "subscribe", "stripe_webhook", "static",
+        "billing",
     }
 
     if request.endpoint in public_endpoints:
