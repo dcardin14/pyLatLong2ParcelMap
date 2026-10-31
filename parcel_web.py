@@ -735,6 +735,12 @@ def billing():
     if not current_user.is_authenticated:
         return redirect(url_for("login"))
 
+    app.logger.warning(
+        "Billing diagnostic: user_id=%s, has_stripe_customer=%s",
+        current_user.id,
+        bool(current_user.stripe_customer_id),
+    )
+
     if not current_user.stripe_customer_id:
         return redirect(url_for("subscribe"))
 
