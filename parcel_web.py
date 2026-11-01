@@ -11,6 +11,7 @@ Do not expose this development server to the public internet.
 import uuid
 import contextlib
 import io
+import json
 import os
 import secrets
 import threading
@@ -32,11 +33,32 @@ from flask_login import (
     current_user,
 )
 from models import db, User
+#----------------------------------------------------------------------
+GOOGLE_TAG = """
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=AW-18550147252"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
 
+  gtag('config', 'AW-18550147252');
+</script>
+"""
+#----------------------------------------------------------------------
 BASE = Path(__file__).resolve().parent
 MAX_BYTES = 25 * 1024 * 1024
 app = Flask(__name__)
-
+#----------------------------------------------------------------------
+@app.after_request
+def add_google_tag(response):
+    if response.mimetype == "text/html":
+        html = response.get_data(as_text=True)
+        if "</head>" in html and "googletagmanager.com/gtag/js?id=AW-18550147252" not in html:
+            html = html.replace("</head>", GOOGLE_TAG + "</head>", 1)
+            response.set_data(html)
+    return response
+#----------------------------------------------------------------------
 import os
 
 os.environ["PATH"] = (
@@ -97,7 +119,7 @@ def require_authentication():
     # These pages must be accessible without an existing account.
     public_endpoints = {
         "register", "login", "logout",
-        "subscribe", "stripe_webhook", "static",
+        "subscribe", "stripe_webhook", "checkout_success", "static",
         "billing",
     }
 
@@ -603,7 +625,7 @@ def subscribe():
                 "client_reference_id": str(current_user.id),
                 "payment_method_collection": "always",
                 "subscription_data": subscription_data,
-                "success_url": url_for("login", _external=True) + "?checkout=success",
+                "success_url": url_for("checkout_success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
                 "cancel_url": url_for("login", _external=True) + "?checkout=cancelled",
             },
             options={"idempotency_key": f"checkout-{attempt_id}"},
@@ -628,6 +650,72 @@ def subscribe():
         db.session.rollback()
         app.logger.exception("Unable to start or recover Stripe Checkout")
         return Response("Unable to verify Checkout. Please try later.", status=503)
+
+
+# ----------------------------------------------------------------------
+@app.route("/checkout-success")
+def checkout_success():
+    """Record a first-time trial only after verifying its Stripe Checkout."""
+    if not current_user.is_authenticated:
+        return redirect(url_for("login"))
+
+    session_id = request.args.get("session_id", "")
+    if not session_id.startswith("cs_") or len(session_id) > 255:
+        return redirect(url_for("subscribe"))
+
+    try:
+        client = stripe.StripeClient(os.environ["STRIPE_SECRET_KEY"])
+        checkout = client.v1.checkout.sessions.retrieve(session_id)
+        if (
+            checkout.status != "complete"
+            or str(checkout.client_reference_id) != str(current_user.id)
+            or checkout.customer != current_user.stripe_customer_id
+            or checkout.id != current_user.stripe_checkout_session_id
+        ):
+            return redirect(url_for("subscribe"))
+        subscription_id = checkout_session_subscription_id(checkout)
+        if not subscription_id:
+            return redirect(url_for("subscribe"))
+        subscription = client.v1.subscriptions.retrieve(subscription_id)
+        if getattr(subscription.customer, "id", subscription.customer) != current_user.stripe_customer_id:
+            return redirect(url_for("subscribe"))
+    except (stripe.StripeError, KeyError):
+        app.logger.exception("Unable to verify completed Checkout for Google Ads")
+        return redirect(url_for("subscribe"))
+
+    # Resubscriptions are immediately paid, so they do not count as new trials.
+    is_new_trial = (
+        subscription.status == "trialing"
+        and bool(subscription.trial_end)
+        and current_user.stripe_subscription_id in (None, subscription_id)
+    )
+    if not is_new_trial:
+        return redirect(url_for("index"))
+
+    # Deduplicate refreshes/back-button navigation in this browser.
+    # The Stripe session ID is not user input: it was verified above.
+    storage_key = json.dumps("google_ads_trial_" + session_id)
+    return f"""<!doctype html><html lang="en"><head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Trial Started - Texas Parcel Mapper</title></head>
+    <body style="font-family:Arial;max-width:500px;margin:60px auto;padding:20px;">
+    <h1>Your free trial has started!</h1>
+    <p>Your Texas Parcel Mapper subscription is ready.</p>
+    <p><a href="/">Open Texas Parcel Mapper</a></p>
+    <script>
+    (function() {{
+      var key = {storage_key};
+      if (sessionStorage.getItem(key)) return;
+      if (typeof gtag !== 'function') return;
+      sessionStorage.setItem(key, 'sent');
+      gtag('event', 'conversion', {{
+        'send_to': 'AW-18550147252/f6fjc064k7AdELSRs41F',
+        'value': 0,
+        'currency': 'USD',
+        'transaction_id': {json.dumps(session_id)}
+      }});
+    }})();
+    </script></body></html>"""
 
 
 # ----------------------------------------------------------------------
