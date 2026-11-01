@@ -9,6 +9,7 @@ from shapely.geometry import Point
 import matplotlib.pyplot as plt
 import subprocess
 import pyogrio
+import textwrap
 
 COUNTY_FILE = "counties/txdot_counties.geojson"
 
@@ -249,7 +250,7 @@ def create_map(gdf, parcel, lat, lon, county_name):
     centroid = parcel_gdf.geometry.iloc[0].centroid
     px, py = point_gdf.geometry.iloc[0].coords[0]
 
-    ax.annotate(
+    selected_label = ax.annotate(
         (
             f"{parcel['OWNER_NAME']}\n"
             f"Parcel ID: {parcel['PROP_ID']}\n"
@@ -281,7 +282,21 @@ def create_map(gdf, parcel, lat, lon, county_name):
     ax.set_xlim(pminx - pxpad, pmaxx + pxpad)
     ax.set_ylim(pminy - pypad, pmaxy + pypad)
 
-    # Label only neighbors inside the view to avoid clutter
+    # Draw the map so label sizes can be measured
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    # Protect the selected parcel's label
+    occupied = [selected_label.get_window_extent(renderer).expanded(1.1, 1.1)]
+
+     # Label neighboring parcels using wrapping and rotation.
+    # The selected parcel's label always takes priority.
+    from matplotlib.transforms import Bbox
+    from shapely.geometry import box as shapely_box
+
+    selected_geometry = parcel_gdf.geometry.iloc[0]
+    view_bounds = ax.get_window_extent(renderer)
+
     for _, row in nearby.iterrows():
 
         if row["PROP_ID"] == parcel["PROP_ID"]:
@@ -292,7 +307,12 @@ def create_map(gdf, parcel, lat, lon, county_name):
         if not isinstance(owner, str) or not owner.strip():
             continue
 
-        pt = row.geometry.representative_point()
+        geometry = row.geometry
+
+        if geometry is None or geometry.is_empty:
+            continue
+
+        pt = geometry.representative_point()
 
         if not (
             pminx - pxpad <= pt.x <= pmaxx + pxpad
@@ -300,20 +320,76 @@ def create_map(gdf, parcel, lat, lon, county_name):
         ):
             continue
 
-        ax.annotate(
-            owner,
-            (pt.x, pt.y),
-            ha="center",
-            fontsize=6,
-            color="black",
-            bbox=dict(
-                facecolor="white",
-                alpha=0.7,
-                edgecolor="none",
-                pad=1.5
-            )
-        )
+        # Try several arrangements, from most readable to most compact.
+        candidates = [
+            (owner, 0),
+            (textwrap.fill(owner, width=18), 0),
+            (textwrap.fill(owner, width=12), 0),
+            (owner, 90),
+            (textwrap.fill(owner, width=18), 90),
+            (textwrap.fill(owner, width=12), 90),
+        ]
 
+        for label_text, angle in candidates:
+
+            label = ax.annotate(
+                label_text,
+                (pt.x, pt.y),
+                ha="center",
+                va="center",
+                rotation=angle,
+                rotation_mode="anchor",
+                fontsize=6,
+                color="black",
+                bbox=dict(
+                    facecolor="white",
+                    alpha=0.7,
+                    edgecolor="none",
+                    pad=1.5
+                )
+            )
+
+            bounds = label.get_window_extent(renderer).expanded(
+                1.05, 1.10
+            )
+
+            # Reject labels that extend outside the map.
+            if not view_bounds.contains(bounds.x0, bounds.y0) or \
+               not view_bounds.contains(bounds.x1, bounds.y1):
+                label.remove()
+                continue
+
+            # Reject labels overlapping accepted labels.
+            if any(bounds.overlaps(existing) for existing in occupied):
+                label.remove()
+                continue
+
+            # Convert the label's screen rectangle to map coordinates.
+            (x0, y0) = ax.transData.inverted().transform(
+                (bounds.x0, bounds.y0)
+            )
+            (x1, y1) = ax.transData.inverted().transform(
+                (bounds.x1, bounds.y1)
+            )
+
+            label_footprint = shapely_box(
+                min(x0, x1), min(y0, y1),
+                max(x0, x1), max(y0, y1)
+            )
+
+            # Never cover the selected parcel.
+            if label_footprint.intersects(selected_geometry):
+                label.remove()
+                continue
+
+            # Require the label to fit inside its own parcel.
+            if not geometry.covers(label_footprint):
+                label.remove()
+                continue
+
+            # This arrangement fits: keep it.
+            occupied.append(bounds)
+            break
     ax.set_title(
         (
             f"{parcel['OWNER_NAME']}\n"

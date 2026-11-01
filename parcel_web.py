@@ -766,16 +766,26 @@ def login():
         user = User.query.filter_by(email=email).first()
 
         if user is None or not user.check_password(password):
-            return Response(
-                "Invalid email address or password.",
-                status=401,
-            )
+            return redirect(url_for("login", error="invalid"))
 
         login_user(user)
 
         return redirect(url_for("subscribe"))
 
     success_message = ""
+    if request.args.get("error") == "invalid":
+        success_message = """
+        <div style="background:#fff3e0;color:#8a4500;
+                    padding:16px;border-radius:8px;
+                    margin-bottom:20px;">
+            <strong>Unable to sign in.</strong>
+            <p style="margin-bottom:0;">
+                Please check your email and password.
+                If you don't have an account, click
+                Create an Account below.
+            </p>
+        </div>
+        """
     if request.args.get("registered") == "1":
         success_message = """
         <div style="background:#e8f5e9;color:#176b35;
