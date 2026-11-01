@@ -1495,9 +1495,18 @@ def index():
 
         result = {"accuracy": accuracy_display, "match_type": match_type, "match_distance": match_distance, "lat": f"{lat:.7f}", "lon": f"{lon:.7f}", "gps_source": gps_source, "details": parcel_details_from_output(output, map_path), "token": token}
         return render_template_string(PAGE, error=None, result=result)
-    except (RuntimeError, OSError, ValueError) as exc:
+    except (RuntimeError, OSError, ValueError):
         app.logger.exception("Photo processing failed")
-        return render_template_string(PAGE, error=str(exc), result=None), 400
+        return render_template_string(
+            PAGE,
+            error=(
+                "We couldn't identify a parcel at this location. "
+                "This may occur on public property, roads, or areas "
+                "without available parcel records. "
+                "Please try another location."
+            ),
+            result=None
+        ), 400
 
 @app.route("/confirm/<token>", methods=["POST"])
 def confirm_parcel(token):
@@ -1557,9 +1566,14 @@ def confirm_parcel(token):
             "map_url": f"/map/{token}",
         }
 
-    except (KeyError, ValueError, RuntimeError, OSError) as exc:
+    except (KeyError, ValueError, RuntimeError, OSError):
         app.logger.exception("Parcel confirmation failed")
-        return {"error": str(exc)}, 400
+        return {
+            "error": (
+                "We couldn't identify a parcel at this location. "
+                "Please select another location and try again."
+            )
+        }, 400
 @app.route("/map/<token>")
 def get_map(token):
     purge_old_results()
