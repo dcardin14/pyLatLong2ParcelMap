@@ -521,7 +521,7 @@ def subscribe():
             description = "$19.99 per month, starting today. Cancel anytime."
             button_text = "Subscribe for $19.99/Month"
         else:
-            heading = "30-Day Free Trial"
+            heading = "7-Day Free Trial"
             description = "Then $19.99 per month. Cancel anytime."
             button_text = "Start My Free Trial"
         return f"""<!doctype html><html lang="en"><head>
@@ -594,7 +594,7 @@ def subscribe():
         customer_id = get_or_create_stripe_customer(client, current_user)
         subscription_data = {"metadata": {"user_id": str(current_user.id)}}
         if not current_user.trial_used:
-            subscription_data["trial_period_days"] = 30
+            subscription_data["trial_period_days"] = 7
         session = client.v1.checkout.sessions.create(
             {
                 "mode": "subscription",
@@ -695,7 +695,7 @@ def login():
                     margin-bottom:20px;">
             <strong>Account created successfully!</strong>
             <p style="margin-bottom:0;">
-                Please sign in to start your 30-day free trial.
+                Please sign in to start your 7-day free trial.
             </p>
         </div>
         """
@@ -740,7 +740,7 @@ def login():
         </a>
 
         <p style="text-align:center;color:#555;font-size:14px;">
-            Start your 30-day free trial
+            Start your 7-day free trial
         </p>    </body>
     </html>
     """.replace("{success_message}", success_message)
@@ -784,7 +784,7 @@ def register():
     </head>
     <body style="font-family:Arial;max-width:450px;margin:60px auto;padding:20px;">
         <h1>Create Your Account</h1>
-        <p>Start your 30-day free trial.</p>
+        <p>Start your 7-day free trial.</p>
 
         <form method="post" action="/register">
             <label>Email address</label>
