@@ -92,7 +92,7 @@ def find_parcel(gdf, lat, lon, exact_only=False):
 
     print(f"Nearest parcel distance: {nearest_distance:.2f} meters")
 
-    max_distance = 15.0
+    max_distance = 45.0
 
     if nearest_distance <= max_distance:
         print(
