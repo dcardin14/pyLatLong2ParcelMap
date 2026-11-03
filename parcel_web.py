@@ -903,7 +903,7 @@ def register():
 #----------------------------------------------------------------------
 PAGE = """<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Texas Photo-to-Parcel</title>
+<title>Texas Parcel Mapper</title>
 <!-- Leaflet interactive mapping library -->
 <link
   rel="stylesheet"
@@ -952,7 +952,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem;
 #processing_status[hidden]{display:none}
 button:disabled{opacity:.6;cursor:wait}
 </style></head><body><main>
-<h1>Texas Photo-to-Parcel</h1>
+<h1>Texas Parcel Mapper</h1>
 <p>
     <a href="{{ url_for('billing') }}">Manage Subscription</a>
 </p>
