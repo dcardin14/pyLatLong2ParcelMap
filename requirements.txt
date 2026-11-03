@@ -9,3 +9,4 @@ Flask-SQLAlchemy>=3.1,<4
 Flask-Login>=0.6,<1
 psycopg[binary]>=3.3,<4
 stripe>=14,<15
+Flask-Limiter>=4,<5

@@ -21,6 +21,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from sqlalchemy.exc import IntegrityError
 from flask import Flask, abort, render_template_string, request, send_file, url_for, Response, redirect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -49,9 +51,19 @@ GOOGLE_TAG = """
 BASE = Path(__file__).resolve().parent
 MAX_BYTES = 25 * 1024 * 1024
 app = Flask(__name__)
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+)
 #----------------------------------------------------------------------
 @app.after_request
 def add_google_tag(response):
+    if request.endpoint in {"forgot_password", "reset_password"}:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
     if response.mimetype == "text/html":
         html = response.get_data(as_text=True)
         if "</head>" in html and "googletagmanager.com/gtag/js?id=AW-18550147252" not in html:
@@ -121,6 +133,7 @@ def require_authentication():
         "register", "login", "logout",
         "subscribe", "stripe_webhook", "checkout_success", "static",
         "billing",
+        "forgot_password", "reset_password",
     }
 
     if request.endpoint in public_endpoints:
@@ -757,6 +770,175 @@ def logout():
     logout_user()
     return Response("Logged out successfully.", status=200)
 #----------------------------------------------------------------------
+# Password recovery
+@app.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("3 per hour", methods=["POST"])
+def forgot_password():
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    from itsdangerous import URLSafeTimedSerializer
+
+    message = ""
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        # Respond identically whether or not this email belongs to an account.
+        message = (
+            "If an account exists for that email address, "
+            "a password reset link has been sent."
+        )
+        user = User.query.filter_by(email=email).first()
+
+        if user is not None:
+            base_url = os.environ.get("APP_BASE_URL", "").rstrip("/")
+            if not base_url.startswith("https://"):
+                app.logger.error("Password reset: APP_BASE_URL must be HTTPS")
+            else:
+                serializer = URLSafeTimedSerializer(app.secret_key)
+                token = serializer.dumps(
+                    [user.id, user.password_hash], salt="password-reset"
+                )
+                reset_url = f"{base_url}/reset-password/{token}"
+
+                try:
+                    msg = EmailMessage()
+                    msg["Subject"] = "Texas Parcel Mapper - Reset Password"
+                    msg["From"] = os.environ["SMTP_FROM"]
+                    msg["To"] = user.email
+                    msg.set_content(
+                        "To reset your Texas Parcel Mapper password, "
+                        "open this link:\n\n"
+                        f"{reset_url}\n\n"
+                        "This link expires in 30 minutes. "
+                        "If you did not request it, ignore this email."
+                    )
+                    with smtplib.SMTP(
+                        os.environ["SMTP_HOST"],
+                        int(os.environ.get("SMTP_PORT", "587")),
+                        timeout=15,
+                    ) as server:
+                        server.starttls(context=ssl.create_default_context())
+                        server.login(
+                            os.environ["SMTP_USERNAME"],
+                            os.environ["SMTP_PASSWORD"],
+                        )
+                        server.send_message(msg)
+                except Exception:
+                    app.logger.exception("Password reset email failed")
+
+    return f"""
+    <!doctype html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Reset Password - Texas Parcel Mapper</title>
+    </head>
+    <body style="font-family:Arial;max-width:450px;
+                 margin:60px auto;padding:20px;">
+        <h1>Forgot Your Password?</h1>
+        <p>{message}</p>
+        <form method="post">
+            <label>Email address</label>
+            <input type="email" name="email" required
+                   autocomplete="email"
+                   style="display:block;width:100%;margin:10px 0 20px;">
+            <button type="submit">Send Reset Link</button>
+        </form>
+        <p><a href="/login">Back to Login</a></p>
+    </body>
+    </html>
+    """
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    import hmac
+    from itsdangerous import (
+        URLSafeTimedSerializer,
+        BadSignature,
+        SignatureExpired
+    )
+    from flask import redirect
+
+    serializer = URLSafeTimedSerializer(app.secret_key)
+
+    try:
+        user_id, original_hash = serializer.loads(
+            token,
+            salt="password-reset",
+            max_age=1800
+        )
+    except (BadSignature, SignatureExpired, ValueError, TypeError):
+        return Response(
+            "Invalid or expired reset link.",
+            status=400
+        )
+
+    user = db.session.get(User, user_id)
+
+    if user is None or not hmac.compare_digest(
+        user.password_hash, original_hash
+    ):
+        return Response(
+            "This reset link is no longer valid.",
+            status=400
+        )
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm", "")
+
+        if not 12 <= len(password) <= 1024:
+            return Response(
+                "Password must be 12 to 1024 characters.",
+                status=400
+            )
+
+        if password != confirm:
+            return Response(
+                "Passwords do not match.",
+                status=400
+            )
+
+        user.set_password(password)
+        db.session.commit()
+
+        return redirect(url_for("login"))
+
+    return """
+    <!doctype html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport"
+              content="width=device-width, initial-scale=1">
+        <title>New Password - Texas Parcel Mapper</title>
+    </head>
+    <body style="font-family:Arial;max-width:450px;
+                 margin:60px auto;padding:20px;">
+        <h1>Choose a New Password</h1>
+        <form method="post">
+            <label>New password</label>
+            <input type="password" name="password"
+                   minlength="12" required
+                   autocomplete="new-password"
+                   style="display:block;width:100%;
+                          margin:10px 0 20px;">
+
+            <label>Confirm password</label>
+            <input type="password" name="confirm"
+                   minlength="12" required
+                   autocomplete="new-password"
+                   style="display:block;width:100%;
+                          margin:10px 0 20px;">
+
+            <button type="submit">Reset Password</button>
+        </form>
+    </body>
+    </html>
+    """
+#----------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -820,8 +1002,15 @@ def login():
                    autocomplete="current-password"
                    style="display:block;width:100%;margin:10px 0 20px;">
 
-            <button type="submit">Sign In</button>
+        <button type="submit">Sign In</button>
         </form>
+
+        <p style="text-align:center;margin-top:18px;">
+            <a href="/forgot-password"
+            style="color:#1769aa;text-decoration:none;">
+                Forgot your password?
+            </a>
+        </p>
         <div style="display:flex;align-items:center;gap:12px;margin:28px 0 18px;">
             <div style="flex:1;border-top:1px solid #ccc;"></div>
             <span style="font-size:12px;color:#666;text-align:center;">
