@@ -92,19 +92,14 @@ def find_parcel(gdf, lat, lon, exact_only=False):
 
     print(f"Nearest parcel distance: {nearest_distance:.2f} meters")
 
-    max_distance = 45.0
-
-    if nearest_distance <= max_distance:
-        print(
-            "WARNING: Using nearest parcel, "
-            "not an exact GPS intersection."
-        )
-        return gdf.loc[nearest_idx]
-
-    raise RuntimeError(
-        f"No parcel found within {max_distance} meters. "
-        f"Nearest parcel is {nearest_distance:.2f} meters away."
+    # A GPS position outside parcel boundaries is not an error.
+    # Use the nearest parcel to initialize the map, regardless of distance.
+    # The user must still explicitly select a parcel on the interactive map.
+    print(
+        "WARNING: Using nearest parcel, "
+        "not an exact GPS intersection."
     )
+    return gdf.loc[nearest_idx]
 
 
 def download_parcel_zip(fips):
@@ -708,11 +703,14 @@ def main():
     xpad = max((maxx - minx) * 2, 0.005)
     ypad = max((maxy - miny) * 2, 0.005)
 
+    # Include both the nearest parcel and the original GPS position.
+    # This keeps parcels around the GPS point available for manual selection
+    # even when the closest parcel is farther than the old 45-meter limit.
     map_bbox = (
-        minx - xpad,
-        miny - ypad,
-        maxx + xpad,
-        maxy + ypad
+        min(minx, lon) - xpad,
+        min(miny, lat) - ypad,
+        max(maxx, lon) + xpad,
+        max(maxy, lat) + ypad
     )
 #-------------------------------------------------------------------------------
     # Load neighboring parcels from every county shapefile.
